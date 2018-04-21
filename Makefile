@@ -295,11 +295,20 @@ CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
 	  else if [ -x /bin/bash ]; then echo /bin/bash; \
 	  else echo sh; fi ; fi)
 
+GRAPHITE     = -fgraphite -fgraphite-identity -floop-interchange -ftree-loop-distribution -floop-strip-mine -floop-block -ftree-loop-linear
 HOSTCC       = gcc
 HOSTCXX      = g++
-HOSTCFLAGS   = -Wall -Wmissing-prototypes -Wstrict-prototypes -O2 -fomit-frame-pointer -std=gnu89
-HOSTCXXFLAGS = -O2
-
+HOSTCFLAGS   = -Wall -Wmissing-prototypes -Wstrict-prototypes -O3 -fomit-frame-pointer -std=gnu89 $(GRAPHITE)
+HOSTCXXFLAGS = -O3 $(GRAPHITE)
+ANDRW		= -pipe -DNDEBUG -munaligned-access -fgcse-lm -fgcse-sm -fsched-spec-load -fsingle-precision-constant -fpredictive-commoning -mcpu=cortex-a7 -marm -mtune=cortex-a7 -mfpu=neon-vfpv4 -ftree-vectorize -ftree-loop-ivcanon -fgcse-after-reload -fmodulo-sched -fmodulo-sched-allow-regmoves -mvectorize-with-neon-quad -fno-aggressive-loop-optimizations -fno-delete-null-pointer-checks -ftree-partial-pre -fvect-cost-model -std=gnu89 $(GPEFLAGS)
+else
+ANDRW		= -pipe -DNDEBUG -munaligned-access -fgcse-lm -fgcse-sm -fsched-spec-load -fsingle-precision-constant -fpredictive-commoning -mcpu=cortex-a7 -marm -mtune=cortex-a7 -mfpu=neon-vfpv4 -ftree-vectorize -ftree-loop-ivcanon -fgcse-after-reload -fmodulo-sched -fmodulo-sched-allow-regmoves -mvectorize-with-neon-quad -fno-aggressive-loop-optimizations -fno-delete-null-pointer-checks -ftree-partial-pre -fvect-cost-model -std=gnu89
+endif
+CFLAGS_MODULE   = -DMODULE -fno-pic $(ANDRW)
+AFLAGS_MODULE = -DMODULE $(ANDRW)
+CFLAGS_KERNEL	= $(ANDRW)
+AFLAGS_KERNEL	= $(ANDRW)
+KERNELFLAGS     = $(GRAPHITE)
 ifeq ($(shell $(HOSTCC) -v 2>&1 | grep -c "clang version"), 1)
 HOSTCFLAGS  += -Wno-unused-value -Wno-unused-parameter \
 		-Wno-missing-field-initializers -fno-delete-null-pointer-checks
@@ -1645,7 +1654,7 @@ endif
 # $(Q)$(MAKE) $(clean)=dir
 clean := -f $(srctree)/scripts/Makefile.clean obj
 
-endif	# skip-makefile
+#endif	# skip-makefile
 
 PHONY += FORCE
 FORCE:
