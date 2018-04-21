@@ -21,14 +21,7 @@
 #include <linux/of_irq.h>
 #include <linux/clk.h>
 #include <linux/gpio.h>
-#ifdef CONFIG_TOUCHSCREEN_PREVENT_SLEEP
-#ifdef CONFIG_TOUCHSCREEN_SWEEP2WAKE
-#include <linux/input/sweep2wake.h>
-#endif
-#ifdef CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE
-#include <linux/input/doubletap2wake.h>
-#endif
-#endif
+
 #define KPD_NAME	"mtk-kpd"
 #define MTK_KP_WAKESOURCE	/* this is for auto set wake up source */
 
