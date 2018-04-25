@@ -49,6 +49,7 @@ NFC | pn547
 5. Disabled gfs
 6. vm.swappiness=0
 7. Disabled crc check
+8. Init.d support (Busybox needed)
 
 ## CPU Governors:
 
