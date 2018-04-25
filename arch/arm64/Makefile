@@ -61,7 +61,6 @@ core-$(CONFIG_CRYPTO) += arch/arm64/crypto/
 core-$(CONFIG_INTELLI_PLUG)	+= arch/arm64/hotplug/INTELLIPLUG/
 core-$(CONFIG_ALUCARD_HOTPLUG)	+= arch/arm64/hotplug/ALUCARD/
 core-$(CONFIG_BRICKED_HOTPLUG)	+= arch/arm64/hotplug/BRICKED/
-core-$(CONFIG_THUNDERPLUG_CONTROL)	+= arch/arm64/hotplug/THUNDERPLUG/
 core-$(CONFIG_ZEN_DECISION)	+= arch/arm64/hotplug/ZENDECISION/
 core-$(CONFIG_ASMP)	+= arch/arm64/hotplug/AUTOSMP/
 libs-y		:= arch/arm64/lib/ $(libs-y)
