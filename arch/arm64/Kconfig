@@ -1146,5 +1146,3 @@ source "arch/arm64/hotplug/BRICKED/Kconfig"
 source "arch/arm64/hotplug/INTELLIPLUG/Kconfig"
 
 source "arch/arm64/hotplug/ZENDECISION/Kconfig"
-
-source "arch/arm64/hotplug/AUTOSMP/Kconfig"
