@@ -40,31 +40,65 @@ NFC | pn547
 # About Kernel
 
 ![Kernel](https://www.seton.com/media/catalog/product/cache/4/image/85e4522595efc69f496374d01ef2bf13/1435180849/i/n/international-symbols---warning-53670-lg.png)
-### Features
+### Features:
+
 1. Frandom
 2. Undervolting
 3. Rewrote battery table
-4. optimized slub
-5. disable gfs
+4. Optimized slub
+5. Disabled gfs
 6. vm.swappiness=0
-7. disable crc check
-8. zzmoove
-9. yankactive
-10. smartmax_eps
-11. smartmax
-12. smartass2 
-13. pegasusq 
-14. ondemand_x 
-15. ondemandplus 
-16. intelliactive 
-17. impulse 
-18. HYPER 
-19. electrodemand 
-20. despair 
-21. darkness 
-22. dancedance 
-23. conservative_x 
-24. blu_active 
-25. bioshock 
-26. barry_allen 
-27. alucard  
+7. Disabled crc check
+
+## CPU Governors:
+
+1. Zzmoove
+2. Yankactive
+3. Smartmax_eps
+4. Smartmax
+5. Smartass2 
+6. Pegasusq 
+7. Ondemand_x 
+8. Pndemandplus 
+9. Intelliactive 
+10. Impulse 
+11. HYPER 
+12. Electrodemand 
+13. Despair 
+14. Darkness 
+15. Dancedance 
+16. Conservative_x 
+17. Blu_active 
+18. Bioshock 
+19. Barry_allen 
+20. Alucard
+
+## CPU Hotplugs:
+
+ 1. IntelliPlug
+ 2. Alucard
+ 3. Bricked
+ 4. Zendecision
+
+## GPU Hotplugs:
+
+1. Performance
+2. Powersave
+3. Userspace
+4. Simpleondemand
+
+## TCP I/O Schedulers:
+
+ 1. ADVANCED
+ 2. CUBIC
+ 3. BIC
+ 4. HTCP
+ 5. WESTWOOD
+ 6. ILLINOIS
+ 7. YEAH
+ 8. VENO
+ 9. LP
+ 10. SCALABLE
+ 11. VEGAS
+ 12. HYBLA
+ 13. HSTCP
