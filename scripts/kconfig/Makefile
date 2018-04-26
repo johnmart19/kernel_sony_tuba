@@ -102,7 +102,7 @@ else
 endif
 
 %_defconfig: $(obj)/conf
-	$(Q)$< --defconfig=arch/arm64/configs/$@ $(Kconfig)
+	$(Q)$< --defconfig=arch/$(SRCARCH)/configs/$@ $(Kconfig)
 
 configfiles=$(wildcard $(srctree)/kernel/configs/$(1).config $(srctree)/arch/$(SRCARCH)/configs/$(1).config)
 
