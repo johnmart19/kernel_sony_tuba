@@ -1,6 +1,6 @@
 VERSION = 3
 PATCHLEVEL = 18
-SUBLEVEL = 109
+SUBLEVEL = 112
 EXTRAVERSION = ϟϟ VoltageDropped ϟϟ
 NAME = Shuffling Zombie Juror
 
