@@ -18,6 +18,5 @@ job_name:
   stage: test
   tags:
     - gitlab-org
-    - gcc
-    - android
+    - shared
   script: *build_script
