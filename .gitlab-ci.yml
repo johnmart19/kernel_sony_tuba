@@ -17,5 +17,7 @@ image: ubuntu:xenial
 job_name: 
   stage: test
   tags:
-    - myserver
+    - gitlab-org
+    - gcc
+    - android
   script: *build_script
