@@ -11,8 +11,6 @@ image: ubuntu:xenial
     - export CROSS_COMPILE=$PWD/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/bin/aarch64-linux-android- #путь до папки с тулчейном и исполняемыми файлами
     - make tubass_defconfig #название вашего defconfig в папке arch/%архитектура%/configs
     - make
-    - curl --upload-file builds.log https://transfer.sh/builds.log |grep transfer
-    - curl --upload-file errors.log https://transfer.sh/errors.log |grep transfer
     - curl --upload-file arch/arm64/boot/Image.gz-dtb https://transfer.sh/Image.gz-dtb |grep transfer
 job_name: 
   stage: test
