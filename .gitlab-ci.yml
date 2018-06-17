@@ -18,5 +18,4 @@ job_name:
   stage: test
   tags:
     - gitlab-org
-    - shared
   script: *build_script
