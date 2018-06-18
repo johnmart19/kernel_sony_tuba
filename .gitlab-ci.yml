@@ -13,7 +13,7 @@ image: ubuntu:xenial
     - make -j4
     - curl --upload-file arch/arm64/boot/Image.gz-dtb https://transfer.sh/Image.gz-dtb |grep transfer
 job_compiling: 
-  stage: build, test, deploy
+  stage: build
   tags:
     - gitlab-org
   script: *build_script
