@@ -1,5 +1,5 @@
 image: ubuntu:xenial
-.job_name:
+.job_compiling:
   script: &build_script
     - apt-get update -qyy
     - apt-get install -qyy curl bc make git build-essential
@@ -10,10 +10,10 @@ image: ubuntu:xenial
     - export SUBARCH=arm64
     - export CROSS_COMPILE=$PWD/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/bin/aarch64-linux-android- #путь до папки с тулчейном и исполняемыми файлами
     - make tubass_defconfig #название вашего defconfig в папке arch/%архитектура%/configs
-    - make
+    - make -j4
     - curl --upload-file arch/arm64/boot/Image.gz-dtb https://transfer.sh/Image.gz-dtb |grep transfer
-job_name: 
-  stage: test
+job_compiling: 
+  stage: stable
   tags:
     - gitlab-org
   script: *build_script
