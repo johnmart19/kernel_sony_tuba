@@ -295,7 +295,7 @@ extern void syscall_unregfunc(void);
 		static const char *___tp_str __tracepoint_string = str; \
 		___tp_str;						\
 	})
-#define __tracepoint_string	__attribute__((section("__tracepoint_str")))
+#define __tracepoint_string	__attribute__((section("__tracepoint_str"), used))
 #else
 /*
  * tracepoint_string() is used to save the string address for userspace
@@ -322,18 +322,18 @@ extern void syscall_unregfunc(void);
  */
 #define DECLARE_TRACE_NOARGS(name)					\
 	__DECLARE_TRACE(name, void, ,					\
-			1,		\
+			cpu_online(raw_smp_processor_id()),		\
 			void *__data, __data)
 
 #define DECLARE_TRACE(name, proto, args)				\
 	__DECLARE_TRACE(name, PARAMS(proto), PARAMS(args),		\
-			1,		\
+			cpu_online(raw_smp_processor_id()),		\
 			PARAMS(void *__data, proto),			\
 			PARAMS(__data, args))
 
 #define DECLARE_TRACE_CONDITION(name, proto, args, cond)		\
 	__DECLARE_TRACE(name, PARAMS(proto), PARAMS(args),		\
-			(PARAMS(cond)), \
+			cpu_online(raw_smp_processor_id()) && (PARAMS(cond)), \
 			PARAMS(void *__data, proto),			\
 			PARAMS(__data, args))
 

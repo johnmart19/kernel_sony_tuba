@@ -24,7 +24,6 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/sched_clock.h>
 #include <linux/slab.h>
 
 #define GPT_IRQ_EN_REG		0x00
@@ -49,7 +48,6 @@
 #define TIMER_CLK_DIV2		(0x1)
 
 #define TIMER_CNT_REG(val)	(0x08 + (0x10 * (val)))
-#define TIMER_CNT_REG_H(val)	(0x08 + (0x10 * (val+1)))
 #define TIMER_CMP_REG(val)	(0x0C + (0x10 * (val)))
 
 #define GPT_CLK_EVT	1
@@ -60,8 +58,6 @@ struct mtk_clock_event_device {
 	u32 ticks_per_jiffy;
 	struct clock_event_device dev;
 };
-
-static struct mtk_clock_event_device *mtk_evt;
 
 static inline struct mtk_clock_event_device *to_mtk_clk(
 				struct clock_event_device *c)
@@ -160,23 +156,19 @@ static void mtk_timer_global_reset(struct mtk_clock_event_device *evt)
 	writel(0x3f, evt->gpt_base + GPT_IRQ_ACK_REG);
 }
 
-static void mtk_timer_setup(struct mtk_clock_event_device *evt, u8 timer,
-			    u8 option, u8 clk_src, bool enable)
+static void
+mtk_timer_setup(struct mtk_clock_event_device *evt, u8 timer, u8 option)
 {
-	u32 val;
-
 	writel(TIMER_CTRL_CLEAR | TIMER_CTRL_DISABLE,
 		evt->gpt_base + TIMER_CTRL_REG(timer));
 
-	writel(TIMER_CLK_SRC(clk_src) | TIMER_CLK_DIV1,
+	writel(TIMER_CLK_SRC(TIMER_CLK_SRC_SYS13M) | TIMER_CLK_DIV1,
 			evt->gpt_base + TIMER_CLK_REG(timer));
 
 	writel(0x0, evt->gpt_base + TIMER_CMP_REG(timer));
 
-	val = TIMER_CTRL_OP(option);
-	if (enable)
-		val |= TIMER_CTRL_ENABLE;
-	writel(val, evt->gpt_base + TIMER_CTRL_REG(timer));
+	writel(TIMER_CTRL_OP(option) | TIMER_CTRL_ENABLE,
+			evt->gpt_base + TIMER_CTRL_REG(timer));
 }
 
 static void mtk_timer_enable_irq(struct mtk_clock_event_device *evt, u8 timer)
@@ -188,28 +180,11 @@ static void mtk_timer_enable_irq(struct mtk_clock_event_device *evt, u8 timer)
 			evt->gpt_base + GPT_IRQ_EN_REG);
 }
 
-u64 mtk_timer_get_cnt(u8 timer)
-{
-	u32 val[2];
-	u64 cnt;
-
-	val[0] = readl(mtk_evt->gpt_base + TIMER_CNT_REG(timer));
-	if (timer == 6) {
-		val[1] = readl(mtk_evt->gpt_base + TIMER_CNT_REG_H(timer));
-		cnt = (((u64)val[1]<<32) | (u64)val[0]);
-		return cnt;
-	}
-
-	cnt = ((u64)val[0])&0x00000000FFFFFFFF;
-	return cnt;
-}
-
 static void __init mtk_timer_init(struct device_node *node)
 {
 	struct mtk_clock_event_device *evt;
 	struct resource res;
-	unsigned long rate1 = 0;
-	unsigned long rate2 = 0;
+	unsigned long rate = 0;
 	struct clk *clk;
 
 	evt = kzalloc(sizeof(*evt), GFP_KERNEL);
@@ -228,97 +203,60 @@ static void __init mtk_timer_init(struct device_node *node)
 	evt->gpt_base = of_io_request_and_map(node, 0, "mtk-timer");
 	if (IS_ERR(evt->gpt_base)) {
 		pr_warn("Can't get resource\n");
-		kfree(evt);
 		return;
 	}
 
 	evt->dev.irq = irq_of_parse_and_map(node, 0);
 	if (evt->dev.irq <= 0) {
-		pr_warn("Can't parse IRQ\n");
+		pr_warn("Can't parse IRQ");
 		goto err_mem;
 	}
 
 	clk = of_clk_get(node, 0);
-
-#ifndef CONFIG_FPGA_EARLY_PORTING
 	if (IS_ERR(clk)) {
-		pr_warn("Can't get timer clock\n");
+		pr_warn("Can't get timer clock");
 		goto err_irq;
 	}
 
 	if (clk_prepare_enable(clk)) {
-		pr_warn("Can't prepare clock\n");
+		pr_warn("Can't prepare clock");
 		goto err_clk_put;
 	}
-	rate1 = clk_get_rate(clk);
-#else
-	rate1 = 13000000; /* FPGA clock hardcode */
-#endif
-
-	clk = of_clk_get(node, 1);
-
-#ifndef CONFIG_FPGA_EARLY_PORTING
-	if (IS_ERR(clk)) {
-		pr_warn("Can't get timer clock\n");
-		goto err_irq;
-	}
-
-	if (clk_prepare_enable(clk)) {
-		pr_warn("Can't prepare clock\n");
-		goto err_clk_put;
-	}
-	rate2 = clk_get_rate(clk);
-#else
-	rate2 = 13000000; /* FPGA clock hardcode */
-#endif
-
+	rate = clk_get_rate(clk);
 
 	mtk_timer_global_reset(evt);
 
 	if (request_irq(evt->dev.irq, mtk_timer_interrupt,
 			IRQF_TIMER | IRQF_IRQPOLL, "mtk_timer", evt)) {
 		pr_warn("failed to setup irq %d\n", evt->dev.irq);
-	#ifndef CONFIG_FPGA_EARLY_PORTING
 		goto err_clk_disable;
-	#endif
 	}
 
-	evt->ticks_per_jiffy = DIV_ROUND_UP(rate2, HZ);
-
-	mtk_evt = evt;
+	evt->ticks_per_jiffy = DIV_ROUND_UP(rate, HZ);
 
 	/* Configure clock source */
-	#ifdef CONFIG_ARCH_ELBRUS
-	mtk_timer_setup(evt, 6, TIMER_CTRL_OP_FREERUN, TIMER_CLK_SRC_SYS13M, true);
-	#endif
-	mtk_timer_setup(evt, GPT_CLK_SRC, TIMER_CTRL_OP_FREERUN, TIMER_CLK_SRC_SYS13M, true);
+	mtk_timer_setup(evt, GPT_CLK_SRC, TIMER_CTRL_OP_FREERUN);
 	clocksource_mmio_init(evt->gpt_base + TIMER_CNT_REG(GPT_CLK_SRC),
-			node->name, rate1, 300, 32, clocksource_mmio_readl_up);
+			node->name, rate, 300, 32, clocksource_mmio_readl_up);
 
 	/* Configure clock event */
-	mtk_timer_setup(evt, GPT_CLK_EVT, TIMER_CTRL_OP_REPEAT, TIMER_CLK_SRC_RTC32K, false);
-	clockevents_config_and_register(&evt->dev, rate2, 0x3,
+	mtk_timer_setup(evt, GPT_CLK_EVT, TIMER_CTRL_OP_REPEAT);
+	clockevents_config_and_register(&evt->dev, rate, 0x3,
 					0xffffffff);
 
 	mtk_timer_enable_irq(evt, GPT_CLK_EVT);
 
 	return;
 
-#ifndef CONFIG_FPGA_EARLY_PORTING
 err_clk_disable:
 	clk_disable_unprepare(clk);
 err_clk_put:
 	clk_put(clk);
 err_irq:
 	irq_dispose_mapping(evt->dev.irq);
-#endif
 err_mem:
 	iounmap(evt->gpt_base);
-	kfree(evt);
-	if (of_address_to_resource(node, 0, &res)) {
-		pr_warn("Failed to parse resource\n");
-		return;
-	}
+	of_address_to_resource(node, 0, &res);
 	release_mem_region(res.start, resource_size(&res));
 }
 CLOCKSOURCE_OF_DECLARE(mtk_mt6577, "mediatek,mt6577-timer", mtk_timer_init);

@@ -17,11 +17,6 @@
 #include <linux/syscore_ops.h>
 #include <linux/uaccess.h>
 
-
-#ifdef CONFIG_CCI_KLOG
-#include <linux/cciklog.h>
-#endif // #ifdef CONFIG_CCI_KLOG
-
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
  */
@@ -289,12 +284,6 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	char buffer[256];
 	int ret = 0;
 
-
-#ifdef CONFIG_CCI_KLOG
-	record_shutdown_time(0x05);
-#endif // #ifdef CONFIG_CCI_KLOG
-
-
 	/* We only trust the superuser with rebooting the system. */
 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
 		return -EPERM;
@@ -456,58 +445,6 @@ int orderly_poweroff(bool force)
 }
 EXPORT_SYMBOL_GPL(orderly_poweroff);
 
-char reboot_cmd[POWEROFF_CMD_PATH_LEN] = "/system/bin/reboot";
-
-static int __orderly_reboot(bool force)
-{
-	char **argv;
-	static const char const *envp[] = {
-		"HOME=/",
-		"PATH=/sbin:/bin:/usr/sbin:/usr/bin",
-		NULL
-	};
-	int ret;
-
-	argv = argv_split(GFP_KERNEL, reboot_cmd, NULL);
-	if (argv) {
-		ret = call_usermodehelper(argv[0], argv, (char **)envp, UMH_WAIT_EXEC);
-		argv_free(argv);
-	} else {
-		ret = -ENOMEM;
-	}
-
-	if (ret && force) {
-		pr_warn("Failed to start orderly reboot: forcing the issue\n");
-		emergency_sync();
-		kernel_restart(NULL);
-	}
-
-	return ret;
-}
-
-static void reboot_work_func(struct work_struct *work)
-{
-	__orderly_reboot(reboot_force);
-}
-
-static DECLARE_WORK(reboot_work, reboot_work_func);
-
-/**
- * orderly_reboot - Trigger an orderly system reboot
- * @force: force reboot if command execution fails
- *
- * This may be called from any context to trigger a system reboot.
- * If the orderly reboot fails, it will force an immediate reboot.
- */
-int orderly_reboot(bool force)
-{
-	if (force) /* do not override the pending "true" */
-		reboot_force = 1;
-	schedule_work(&reboot_work);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(orderly_reboot);
-
 static int __init reboot_setup(char *str)
 {
 	for (;;) {
@@ -532,22 +469,22 @@ static int __init reboot_setup(char *str)
 			break;
 
 		case 's':
-		{
-			int rc;
-
-			if (isdigit(*(str+1))) {
-				rc = kstrtoint(str+1, 0, &reboot_cpu);
-				if (rc)
-					return rc;
-			} else if (str[1] == 'm' && str[2] == 'p' &&
-				   isdigit(*(str+3))) {
-				rc = kstrtoint(str+3, 0, &reboot_cpu);
-				if (rc)
-					return rc;
-			} else
+			if (isdigit(*(str+1)))
+				reboot_cpu = simple_strtoul(str+1, NULL, 0);
+			else if (str[1] == 'm' && str[2] == 'p' &&
+							isdigit(*(str+3)))
+				reboot_cpu = simple_strtoul(str+3, NULL, 0);
+			else
 				reboot_mode = REBOOT_SOFT;
+			if (reboot_cpu >= num_possible_cpus()) {
+				pr_err("Ignoring the CPU number in reboot= option. "
+				       "CPU %d exceeds possible cpu number %d\n",
+				       reboot_cpu, num_possible_cpus());
+				reboot_cpu = 0;
+				break;
+			}
 			break;
-		}
+
 		case 'g':
 			reboot_mode = REBOOT_GPIO;
 			break;

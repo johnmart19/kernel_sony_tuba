@@ -45,10 +45,10 @@ static ssize_t power_supply_show_property(struct device *dev,
 					  char *buf) {
 	static char *type_text[] = {
 		"Unknown", "Battery", "UPS", "Mains", "USB",
-		"USB_DCP", "USB_CDP", "USB_ACA", "Wireless"
+		"USB_DCP", "USB_CDP", "USB_ACA"
 	};
 	static char *status_text[] = {
-		"Unknown", "Charging", "Discharging", "Not charging", "Full", "Cmd discharging"
+		"Unknown", "Charging", "Discharging", "Not charging", "Full"
 	};
 	static char *charge_type[] = {
 		"Unknown", "N/A", "Trickle", "Fast"
@@ -206,37 +206,10 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(charge_enabled),
 	/* Local extensions of type int64_t */
 	POWER_SUPPLY_ATTR(charge_counter_ext),
-	/* 20100723 James Lo */
-	POWER_SUPPLY_ATTR(batt_vol),
-	POWER_SUPPLY_ATTR(batt_temp),
-	/* 20100405 Add for EM */
-	POWER_SUPPLY_ATTR(TemperatureR),
-	POWER_SUPPLY_ATTR(TempBattVoltage),
-	POWER_SUPPLY_ATTR(InstatVolt),
-	POWER_SUPPLY_ATTR(BatteryAverageCurrent),
-	POWER_SUPPLY_ATTR(BatterySenseVoltage),
-	POWER_SUPPLY_ATTR(ISenseVoltage),
-	POWER_SUPPLY_ATTR(ChargerVoltage),
-//CEI comment start//
-//Prevent swelling
-	POWER_SUPPLY_ATTR(enable_llk),
-//CEI comment end//
-	/* Dual battery */
-	POWER_SUPPLY_ATTR(status_smb),
-	POWER_SUPPLY_ATTR(capacity_smb),
-	POWER_SUPPLY_ATTR(present_smb),
-	/* ADB CMD Discharging */
-	POWER_SUPPLY_ATTR(adjust_power),
-#ifdef CONFIG_CHARGER_QNS
-	POWER_SUPPLY_ATTR(max_charge_current),
-#endif
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(model_name),
 	POWER_SUPPLY_ATTR(manufacturer),
 	POWER_SUPPLY_ATTR(serial_number),
-#ifdef CONFIG_CHARGER_QNS
-	POWER_SUPPLY_ATTR(battery_type),
-#endif
 };
 
 static struct attribute *

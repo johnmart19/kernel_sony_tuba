@@ -25,8 +25,6 @@
 #include <asm/system_misc.h>
 #include <asm/system_info.h>
 #include <asm/tlbflush.h>
-#include <mt-plat/mtk_hooks.h>
-#include <mt-plat/aee.h>
 
 #include "fault.h"
 
@@ -166,10 +164,6 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 {
 	struct siginfo si;
 
-	if (mem_fault_debug_hook)
-		if (!mem_fault_debug_hook(regs))
-			return;
-
 #ifdef CONFIG_DEBUG_USER
 	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
 	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
@@ -218,7 +212,7 @@ static inline bool access_error(unsigned int fsr, struct vm_area_struct *vma)
 {
 	unsigned int mask = VM_READ | VM_WRITE | VM_EXEC;
 
-	if (fsr & FSR_WRITE)
+	if ((fsr & FSR_WRITE) && !(fsr & FSR_CM))
 		mask = VM_WRITE;
 	if (fsr & FSR_LNX_PF)
 		mask = VM_EXEC;
@@ -288,7 +282,7 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
-	if (fsr & FSR_WRITE)
+	if ((fsr & FSR_WRITE) && !(fsr & FSR_CM))
 		flags |= FAULT_FLAG_WRITE;
 
 	/*
@@ -321,8 +315,11 @@ retry:
 	 * signal first. We do not need to release the mmap_sem because
 	 * it would already be released in __lock_page_or_retry in
 	 * mm/filemap.c. */
-	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current)) {
+		if (!user_mode(regs))
+			goto no_context;
 		return 0;
+	}
 
 	/*
 	 * Major/minor page fault accounting is only done on the
@@ -551,33 +548,11 @@ hook_fault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *)
 asmlinkage void __exception
 do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	struct thread_info *thread = current_thread_info();
 	const struct fsr_info *inf = fsr_info + fsr_fs(fsr);
 	struct siginfo info;
 
-	if (!user_mode(regs)) {
-		thread->cpu_excp++;
-		if (thread->cpu_excp == 1) {
-			thread->regs_on_excp = (void *)regs;
-			aee_excp_regs = (void *)regs;
-		}
-		/*
-		 * NoteXXX: The data abort exception may happen twice
-		 *          when calling probe_kernel_address() in which.
-		 *          __copy_from_user_inatomic() is used and the
-		 *          fixup table lookup may be performed.
-		 *          Check if the nested panic happens via
-		 *          (cpu_excp >= 3).
-		 */
-		if (thread->cpu_excp >= 3)
-			aee_stop_nested_panic(regs);
-	}
-
-	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs)) {
-		if (!user_mode(regs))
-			thread->cpu_excp--;
+	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
 		return;
-	}
 
 	printk(KERN_ALERT "Unhandled fault: %s (0x%03x) at 0x%08lx\n",
 		inf->name, fsr, addr);
@@ -605,31 +580,11 @@ hook_ifault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *
 asmlinkage void __exception
 do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
 {
-	struct thread_info *thread = current_thread_info();
 	const struct fsr_info *inf = ifsr_info + fsr_fs(ifsr);
 	struct siginfo info;
 
-	if (!user_mode(regs)) {
-		thread->cpu_excp++;
-		if (thread->cpu_excp == 1)
-			thread->regs_on_excp = (void *)regs;
-		/*
-		 * NoteXXX: The data abort exception may happen twice
-		 *          when calling probe_kernel_address() in which.
-		 *          __copy_from_user_inatomic() is used and the
-		 *          fixup table lookup may be performed.
-		 *          Check if the nested panic happens via
-		 *          (cpu_excp >= 3).
-		 */
-		if (thread->cpu_excp >= 3)
-			aee_stop_nested_panic(regs);
-	}
-
-	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs)) {
-		if (!user_mode(regs))
-			thread->cpu_excp--;
+	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
 		return;
-	}
 
 	printk(KERN_ALERT "Unhandled prefetch abort: %s (0x%03x) at 0x%08lx\n",
 		inf->name, ifsr, addr);

@@ -1,8 +1,8 @@
 VERSION = 3
 PATCHLEVEL = 18
-SUBLEVEL = 35
+SUBLEVEL = 140
 EXTRAVERSION =
-NAME = Shuffling Zombie Juror
+NAME = Diseased Newt
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -127,6 +127,10 @@ _all:
 # Cancel implicit rules on top Makefile
 $(CURDIR)/Makefile Makefile: ;
 
+ifneq ($(words $(subst :, ,$(CURDIR))), 1)
+  $(error main directory cannot contain spaces nor colons)
+endif
+
 ifneq ($(KBUILD_OUTPUT),)
 # Invoke a second make in the output directory, passing relevant variables
 # check that the output directory actually exists
@@ -141,7 +145,7 @@ PHONY += $(MAKECMDGOALS) sub-make
 $(filter-out _all sub-make $(CURDIR)/Makefile, $(MAKECMDGOALS)) _all: sub-make
 	@:
 
-sub-make: FORCE
+sub-make:
 	$(Q)$(MAKE) -C $(KBUILD_OUTPUT) KBUILD_SRC=$(CURDIR) \
 	-f $(CURDIR)/Makefile $(filter-out _all sub-make,$(MAKECMDGOALS))
 
@@ -213,7 +217,6 @@ obj		:= $(objtree)
 VPATH		:= $(srctree)$(if $(KBUILD_EXTMOD),:$(KBUILD_EXTMOD))
 
 export srctree objtree VPATH
-
 
 # SUBARCH tells the usermode build what the underlying arch is.  That is set
 # first, and if a usermode build is happening, the "ARCH=um" on the command
@@ -312,12 +315,8 @@ KBUILD_MODULES :=
 KBUILD_BUILTIN := 1
 
 # If we have only "make modules", don't compile built-in objects.
-# When we're building modules with modversions, we need to consider
-# the built-in objects during the descend as well, in order to
-# make sure the checksums are up to date before we record them.
-
 ifeq ($(MAKECMDGOALS),modules)
-  KBUILD_BUILTIN := $(if $(CONFIG_MODVERSIONS),1)
+  KBUILD_BUILTIN :=
 endif
 
 # If we have "make <whatever> modules", compile modules
@@ -378,7 +377,6 @@ CFLAGS_KERNEL	=
 AFLAGS_KERNEL	=
 CFLAGS_GCOV	= -fprofile-arcs -ftest-coverage -fno-tree-loop-im
 
-
 # Use USERINCLUDE when you must reference the UAPI directories only.
 USERINCLUDE    := \
 		-I$(srctree)/arch/$(hdr-arch)/include/uapi \
@@ -394,7 +392,7 @@ LINUXINCLUDE    := \
 		-Iarch/$(hdr-arch)/include/generated \
 		$(if $(KBUILD_SRC), -I$(srctree)/include) \
 		-Iinclude \
-		$(USERINCLUDE)\
+		$(USERINCLUDE)
 
 KBUILD_CPPFLAGS := -D__KERNEL__
 
@@ -402,11 +400,12 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -fno-strict-aliasing -fno-common \
 		   -Werror-implicit-function-declaration \
 		   -Wno-format-security \
-		   -std=gnu89
+		   -std=gnu89 $(call cc-option,-fno-PIE)
+
 
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
-KBUILD_AFLAGS   := -D__ASSEMBLY__
+KBUILD_AFLAGS   := -D__ASSEMBLY__ $(call cc-option,-fno-PIE)
 KBUILD_AFLAGS_MODULE  := -DMODULE
 KBUILD_CFLAGS_MODULE  := -DMODULE
 KBUILD_LDFLAGS_MODULE := -T $(srctree)/scripts/module-common.lds
@@ -503,6 +502,12 @@ ifeq ($(KBUILD_EXTMOD),)
                 ifneq ($(filter-out config %config,$(MAKECMDGOALS)),)
                         mixed-targets := 1
                 endif
+        endif
+endif
+# install and module_install need also be processed one by one
+ifneq ($(filter install,$(MAKECMDGOALS)),)
+        ifneq ($(filter modules_install,$(MAKECMDGOALS)),)
+	        mixed-targets := 1
         endif
 endif
 
@@ -610,15 +615,32 @@ all: vmlinux
 include $(srctree)/arch/$(SRCARCH)/Makefile
 
 KBUILD_CFLAGS	+= $(call cc-option,-fno-delete-null-pointer-checks,)
+KBUILD_CFLAGS	+= $(call cc-disable-warning, format-truncation)
+KBUILD_CFLAGS	+= $(call cc-disable-warning, format-overflow)
+KBUILD_CFLAGS	+= $(call cc-disable-warning, int-in-bool-context)
+KBUILD_CFLAGS	+= $(call cc-disable-warning, address-of-packed-member)
+KBUILD_CFLAGS	+= $(call cc-disable-warning, attribute-alias)
+KBUILD_CFLAGS	+= $(call cc-disable-warning,maybe-uninitialized,)
 
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
-KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,maybe-uninitialized,)
+KBUILD_CFLAGS	+= -Os
 else
+ifdef CONFIG_PROFILE_ALL_BRANCHES
 KBUILD_CFLAGS	+= -O2
+else
+KBUILD_CFLAGS   += -O2
+endif
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
+KBUILD_CFLAGS	+= $(call cc-option,-fno-allow-store-data-races)
+
+# check for 'asm goto'
+ifeq ($(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC) $(KBUILD_CFLAGS)), y)
+	KBUILD_CFLAGS += -DCC_HAVE_ASM_GOTO
+	KBUILD_AFLAGS += -DCC_HAVE_ASM_GOTO
+endif
 
 ifdef CONFIG_READABLE_ASM
 # Disable optimizations that make assembler listings hard to read.
@@ -631,7 +653,6 @@ KBUILD_CFLAGS += $(call cc-option,-fno-reorder-blocks,) \
 endif
 
 ifneq ($(CONFIG_FRAME_WARN),0)
-KBUILD_CFLAGS += $(call cc-option,-Werror=frame-larger-than=1)
 KBUILD_CFLAGS += $(call cc-option,-Wframe-larger-than=${CONFIG_FRAME_WARN})
 endif
 
@@ -739,51 +760,6 @@ ifdef CONFIG_DYNAMIC_FTRACE
 endif
 endif
 
-#[VY36] ==> CCI KLog, added by Jimmy@CCI
-ifdef CONFIG_CCI_KLOG
-	KBUILD_CFLAGS	+= -DCCI_KLOG=y
-	ifdef CONFIG_CCI_KLOG_START_ADDR_PHYSICAL
-		KBUILD_CFLAGS	+= -DCCI_KLOG_START_ADDR_PHYSICAL=$(CONFIG_CCI_KLOG_START_ADDR_PHYSICAL)
-	endif # ifdef CONFIG_CCI_KLOG_START_ADDR_PHYSICAL
-	ifdef CONFIG_CCI_KLOG_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_SIZE=$(CONFIG_CCI_KLOG_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_SIZE
-	ifdef CONFIG_CCI_KLOG_HEADER_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_HEADER_SIZE=$(CONFIG_CCI_KLOG_HEADER_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_HEADER_SIZE
-	ifdef CONFIG_CCI_KLOG_CRASH_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_CRASH_SIZE=$(CONFIG_CCI_KLOG_CRASH_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_CRASH_SIZE
-	ifdef CONFIG_CCI_KLOG_APPSBL_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_APPSBL_SIZE=$(CONFIG_CCI_KLOG_APPSBL_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_APPSBL_SIZE
-	ifdef CONFIG_CCI_KLOG_KERNEL_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_KERNEL_SIZE=$(CONFIG_CCI_KLOG_KERNEL_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_KERNEL_SIZE
-	ifdef CONFIG_CCI_KLOG_ANDROID_MAIN_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_ANDROID_MAIN_SIZE=$(CONFIG_CCI_KLOG_ANDROID_MAIN_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_ANDROID_MAIN_SIZE
-	ifdef CONFIG_CCI_KLOG_ANDROID_SYSTEM_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_ANDROID_SYSTEM_SIZE=$(CONFIG_CCI_KLOG_ANDROID_SYSTEM_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_ANDROID_SYSTEM_SIZE
-	ifdef CONFIG_CCI_KLOG_ANDROID_RADIO_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_ANDROID_RADIO_SIZE=$(CONFIG_CCI_KLOG_ANDROID_RADIO_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_ANDROID_RADIO_SIZE
-	ifdef CONFIG_CCI_KLOG_ANDROID_EVENTS_SIZE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_ANDROID_EVENTS_SIZE=$(CONFIG_CCI_KLOG_ANDROID_EVENTS_SIZE)
-	endif # ifdef CONFIG_CCI_KLOG_ANDROID_EVENTS_SIZE
-	ifdef CONFIG_CCI_KLOG_SUPPORT_CCI_ENGMODE
-		KBUILD_CFLAGS	+= -DCCI_KLOG_SUPPORT_CCI_ENGMODE=y
-	endif # ifdef CONFIG_CCI_KLOG_SUPPORT_CCI_ENGMODE
-	ifdef CONFIG_CCI_KLOG_ALLOW_FORCE_PANIC
-		KBUILD_CFLAGS	+= -DCCI_KLOG_ALLOW_FORCE_PANIC=y
-	endif # ifdef CONFIG_CCI_KLOG_ALLOW_FORCE_PANIC
-	ifdef CONFIG_CCI_KLOG_SUPPORT_RESTORATION
-		KBUILD_CFLAGS	+= -DCCI_KLOG_SUPPORT_RESTORATION=y
-	endif # ifdef CONFIG_CCI_KLOG_SUPPORT_RESTORATION
-endif # ifdef CONFIG_CCI_KLOG
-#[VY36] <== CCI KLog, added by Jimmy@CCI
-
 # We trigger additional mismatches with less inlining
 ifdef CONFIG_DEBUG_SECTION_MISMATCH
 KBUILD_CFLAGS += $(call cc-option, -fno-inline-functions-called-once)
@@ -799,8 +775,25 @@ KBUILD_CFLAGS += $(call cc-option,-Wdeclaration-after-statement,)
 # disable pointer signed / unsigned warnings in gcc 4.0
 KBUILD_CFLAGS += $(call cc-disable-warning, pointer-sign)
 
+# disable stringop warnings in gcc 8+
+KBUILD_CFLAGS += $(call cc-disable-warning, stringop-truncation)
+
+# We'll want to enable this eventually, but it's not going away for 5.7 at least
+KBUILD_CFLAGS += $(call cc-disable-warning, zero-length-bounds)
+KBUILD_CFLAGS += $(call cc-disable-warning, array-bounds)
+KBUILD_CFLAGS += $(call cc-disable-warning, stringop-overflow)
+
+# Another good warning that we'll want to enable eventually
+KBUILD_CFLAGS += $(call cc-disable-warning, restrict)
+
+# Enabled with W=2, disabled by default as noisy
+KBUILD_CFLAGS += $(call cc-disable-warning, maybe-uninitialized)
+
 # disable invalid "can't wrap" optimizations for signed / pointers
 KBUILD_CFLAGS	+= $(call cc-option,-fno-strict-overflow)
+
+# Make sure -fstack-check isn't enabled (like gentoo apparently did)
+KBUILD_CFLAGS  += $(call cc-option,-fno-stack-check,)
 
 # conserve stack if available
 KBUILD_CFLAGS   += $(call cc-option,-fconserve-stack)
@@ -814,13 +807,15 @@ KBUILD_CFLAGS   += $(call cc-option,-Werror=strict-prototypes)
 # Prohibit date/time macros, which would make the build non-deterministic
 KBUILD_CFLAGS   += $(call cc-option,-Werror=date-time)
 
+# ensure -fcf-protection is disabled when using retpoline as it is
+# incompatible with -mindirect-branch=thunk-extern
+ifdef CONFIG_RETPOLINE
+KBUILD_CFLAGS += $(call cc-option,-fcf-protection=none)
+endif
+
 # use the deterministic mode of AR if available
 KBUILD_ARFLAGS := $(call ar-option,D)
 
-# check for 'asm goto'
-ifeq ($(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC)), y)
-	KBUILD_CFLAGS += -DCC_HAVE_ASM_GOTO
-endif
 
 include $(srctree)/scripts/Makefile.extrawarn
 
@@ -1018,13 +1013,12 @@ endif
 prepare2: prepare3 outputmakefile asm-generic
 
 prepare1: prepare2 $(version_h) include/generated/utsrelease.h \
-                   include/generated/cciklog_common.h \
                    include/config/auto.conf
 	$(cmd_crmodverdir)
 
 archprepare: archheaders archscripts prepare1 scripts_basic
 
-prepare0: archprepare FORCE
+prepare0: archprepare
 	$(Q)$(MAKE) $(build)=.
 
 # All the preparing..
@@ -1051,17 +1045,6 @@ define filechk_version.h
 	echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))';)
 endef
 
-#[VY36] ==> CCI KLog, added by Jimmy@CCI
-define filechk_cciklog_common.h
-	(cat $(srctree)/../vendor/cci/tools/klogcat/cciklog_common.h)
-endef
-
-include/generated/cciklog_common.h: $(srctree)/Makefile FORCE
-ifdef CONFIG_CCI_KLOG
-	$(call filechk,cciklog_common.h)
-endif # ifdef CONFIG_CCI_KLOG
-#[VY36] <== CCI KLog, added by Jimmy@CCI
-
 $(version_h): $(srctree)/Makefile FORCE
 	$(call filechk,version.h)
 
@@ -1085,7 +1068,7 @@ INSTALL_FW_PATH=$(INSTALL_MOD_PATH)/lib/firmware
 export INSTALL_FW_PATH
 
 PHONY += firmware_install
-firmware_install: FORCE
+firmware_install:
 	@mkdir -p $(objtree)/firmware
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.fwinst obj=firmware __fw_install
 
@@ -1107,7 +1090,7 @@ PHONY += archscripts
 archscripts:
 
 PHONY += __headers
-__headers: $(version_h) scripts_basic asm-generic archheaders archscripts FORCE
+__headers: $(version_h) scripts_basic asm-generic archheaders archscripts
 	$(Q)$(MAKE) $(build)=scripts build_unifdef
 
 PHONY += headers_install_all
@@ -1145,6 +1128,13 @@ ifdef CONFIG_MODULES
 # By default, build modules as well
 
 all: modules
+
+# When we're building modules with modversions, we need to consider
+# the built-in objects during the descend as well, in order to
+# make sure the checksums are up to date before we record them.
+ifdef CONFIG_MODVERSIONS
+  KBUILD_BUILTIN := 1
+endif
 
 # Build modules
 #
@@ -1316,7 +1306,7 @@ help:
 	@echo  '  firmware_install- Install all firmware to INSTALL_FW_PATH'
 	@echo  '                    (default: $$(INSTALL_MOD_PATH)/lib/firmware)'
 	@echo  '  dir/            - Build all files in dir and below'
-	@echo  '  dir/file.[oisS] - Build specified target only'
+	@echo  '  dir/file.[ois]  - Build specified target only'
 	@echo  '  dir/file.lst    - Build specified mixed source/assembly target only'
 	@echo  '                    (requires a recent binutils and recent build (System.map))'
 	@echo  '  dir/file.ko     - Build module including final link'
@@ -1554,11 +1544,11 @@ image_name:
 # Clear a bunch of variables before executing the submake
 tools/: FORCE
 	$(Q)mkdir -p $(objtree)/tools
-	$(Q)$(MAKE) LDFLAGS= MAKEFLAGS="$(filter --j% -j,$(MAKEFLAGS))" O=$(objtree) subdir=tools -C $(src)/tools/
+	$(Q)$(MAKE) LDFLAGS= MAKEFLAGS="$(filter --j% -j,$(MAKEFLAGS))" O=$(shell cd $(objtree) && /bin/pwd) subdir=tools -C $(src)/tools/
 
 tools/%: FORCE
 	$(Q)mkdir -p $(objtree)/tools
-	$(Q)$(MAKE) LDFLAGS= MAKEFLAGS="$(filter --j% -j,$(MAKEFLAGS))" O=$(objtree) subdir=tools -C $(src)/tools/ $*
+	$(Q)$(MAKE) LDFLAGS= MAKEFLAGS="$(filter --j% -j,$(MAKEFLAGS))" O=$(shell cd $(objtree) && /bin/pwd) subdir=tools -C $(src)/tools/ $*
 
 # Single targets
 # ---------------------------------------------------------------------------

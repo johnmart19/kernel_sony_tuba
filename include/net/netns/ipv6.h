@@ -32,8 +32,6 @@ struct netns_sysctl_ipv6 {
 	int icmpv6_time;
 	int anycast_src_echo_reply;
 	int fwmark_reflect;
-	int idgen_retries;
-	int idgen_delay;
 };
 
 struct netns_ipv6 {
@@ -83,7 +81,6 @@ struct netns_ipv6 {
 
 #if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
 struct netns_nf_frag {
-	struct netns_sysctl_ipv6 sysctl;
 	struct netns_frags	frags;
 };
 #endif

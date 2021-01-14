@@ -35,8 +35,6 @@
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
-#include <mt-plat/mrdump.h>
-#include <mt-plat/mtk_meminfo.h>
 
 #include "mm.h"
 
@@ -189,15 +187,6 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 {
 	unsigned long zone_size[MAX_NR_ZONES], zhole_size[MAX_NR_ZONES];
 	struct memblock_region *reg;
-	unsigned long highmem_high;
-#ifdef CONFIG_ZONE_MOVABLE_CMA
-	phys_addr_t cma_base, cma_size;
-	unsigned long cma_base_pfn = ULONG_MAX;
-
-	cma_get_range(&cma_base, &cma_size);
-	if (cma_size)
-		cma_base_pfn = PFN_DOWN(cma_base);
-#endif
 
 	/*
 	 * initialise the zones.
@@ -210,20 +199,8 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 	 * to the zones, now is the time to do it.
 	 */
 	zone_size[0] = max_low - min;
-#ifdef CONFIG_ZONE_MOVABLE_CMA
-	highmem_high = cma_base_pfn;
-	zone_size[ZONE_MOVABLE] = max_high - highmem_high;
-#else
-	highmem_high = max_high;
-#endif
-
 #ifdef CONFIG_HIGHMEM
-	if (highmem_high > max_low) {
-		zone_size[ZONE_HIGHMEM] = highmem_high - max_low;
-	} else if (highmem_high > min) {
-		max_low = highmem_high;
-		zone_size[0] = max_low - min;
-	}
+	zone_size[ZONE_HIGHMEM] = max_high - max_low;
 #endif
 
 	/*
@@ -240,18 +217,9 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 			zhole_size[0] -= low_end - start;
 		}
 #ifdef CONFIG_HIGHMEM
-		if (end > max_low && zhole_size[ZONE_HIGHMEM] > 0) {
+		if (end > max_low) {
 			unsigned long high_start = max(start, max_low);
-			unsigned long high_end = min(end, highmem_high);
-
-			zhole_size[ZONE_HIGHMEM] -= high_end - high_start;
-		}
-#endif
-#ifdef CONFIG_ZONE_MOVABLE_CMA
-		if (end > highmem_high) {
-			unsigned long high_start = max(start, highmem_high);
-
-			zhole_size[ZONE_MOVABLE] -= end - high_start;
+			zhole_size[ZONE_HIGHMEM] -= end - high_start;
 		}
 #endif
 	}
@@ -356,7 +324,7 @@ void __init arm_memblock_init(const struct machine_desc *mdesc)
 	 * must come from DMA area inside low memory
 	 */
 	dma_contiguous_reserve(arm_dma_limit);
-	mrdump_rsvmem();
+
 	arm_memblock_steal_permitted = false;
 	memblock_dump_all();
 }
@@ -676,7 +644,7 @@ static struct section_perm nx_perms[] = {
 	/* Make rodata NX (set RO in ro_perms below). */
 	{
 		.start  = (unsigned long)__start_rodata,
-		.end    = (unsigned long)_etext,
+		.end    = (unsigned long)__init_begin,
 		.mask   = ~PMD_SECT_XN,
 		.prot   = PMD_SECT_XN,
 	},
@@ -688,10 +656,10 @@ static struct section_perm ro_perms[] = {
 	/* Make kernel code and rodata RX (set RO). */
 	{
 		.start  = (unsigned long)_stext,
-		.end    = (unsigned long)_etext,
+		.end    = (unsigned long)__init_begin,
 #ifdef CONFIG_ARM_LPAE
-		.mask   = ~(L_PMD_SECT_RDONLY | L_PMD_SECT_AP2),
-		.prot   = L_PMD_SECT_RDONLY | L_PMD_SECT_AP2,
+		.mask   = ~(L_PMD_SECT_RDONLY | PMD_SECT_AP2),
+		.prot   = L_PMD_SECT_RDONLY | PMD_SECT_AP2,
 #else
 		.mask   = ~(PMD_SECT_APX | PMD_SECT_AP_WRITE),
 		.prot   = PMD_SECT_APX | PMD_SECT_AP_WRITE,

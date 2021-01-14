@@ -667,9 +667,11 @@ static const struct drm_fb_helper_funcs qxl_fb_helper_funcs = {
 
 int qxl_fbdev_init(struct qxl_device *qdev)
 {
+	int ret = 0;
+
+#ifdef CONFIG_DRM_FBDEV_EMULATION
 	struct qxl_fbdev *qfbdev;
 	int bpp_sel = 32; /* TODO: parameter from somewhere? */
-	int ret;
 
 	qfbdev = kzalloc(sizeof(struct qxl_fbdev), GFP_KERNEL);
 	if (!qfbdev)
@@ -686,14 +688,26 @@ int qxl_fbdev_init(struct qxl_device *qdev)
 	ret = drm_fb_helper_init(qdev->ddev, &qfbdev->helper,
 				 qxl_num_crtc /* num_crtc - QXL supports just 1 */,
 				 QXLFB_CONN_LIMIT);
-	if (ret) {
-		kfree(qfbdev);
-		return ret;
-	}
+	if (ret)
+		goto free;
 
-	drm_fb_helper_single_add_all_connectors(&qfbdev->helper);
-	drm_fb_helper_initial_config(&qfbdev->helper, bpp_sel);
+	ret = drm_fb_helper_single_add_all_connectors(&qfbdev->helper);
+	if (ret)
+		goto fini;
+
+	ret = drm_fb_helper_initial_config(&qfbdev->helper, bpp_sel);
+	if (ret)
+		goto fini;
+
 	return 0;
+
+fini:
+	drm_fb_helper_fini(&qfbdev->helper);
+free:
+	kfree(qfbdev);
+#endif
+
+	return ret;
 }
 
 void qxl_fbdev_fini(struct qxl_device *qdev)
@@ -708,6 +722,9 @@ void qxl_fbdev_fini(struct qxl_device *qdev)
 
 void qxl_fbdev_set_suspend(struct qxl_device *qdev, int state)
 {
+	if (!qdev->mode_info.qfbdev)
+		return;
+
 	fb_set_suspend(qdev->mode_info.qfbdev->helper.fbdev, state);
 }
 

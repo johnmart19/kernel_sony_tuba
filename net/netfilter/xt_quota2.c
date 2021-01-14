@@ -21,8 +21,27 @@
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_quota2.h>
+
 #ifdef CONFIG_NETFILTER_XT_MATCH_QUOTA2_LOG
-#include <linux/netfilter_ipv4/ipt_ULOG.h>
+/* For compatibility, these definitions are copied from the
+ * deprecated header file <linux/netfilter_ipv4/ipt_ULOG.h> */
+#define ULOG_MAC_LEN	80
+#define ULOG_PREFIX_LEN	32
+
+/* Format of the ULOG packets passed through netlink */
+typedef struct ulog_packet_msg {
+	unsigned long mark;
+	long timestamp_sec;
+	long timestamp_usec;
+	unsigned int hook;
+	char indev_name[IFNAMSIZ];
+	char outdev_name[IFNAMSIZ];
+	size_t data_len;
+	char prefix[ULOG_PREFIX_LEN];
+	unsigned char mac_len;
+	unsigned char mac[ULOG_MAC_LEN];
+	unsigned char payload[0];
+} ulog_packet_msg_t;
 #endif
 
 /**
@@ -287,6 +306,8 @@ quota_mt2(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	struct xt_quota_mtinfo2 *q = (void *)par->matchinfo;
 	struct xt_quota_counter *e = q->master;
+	int charge = (q->flags & XT_QUOTA_PACKET) ? 1 : skb->len;
+	bool no_change = q->flags & XT_QUOTA_NO_CHANGE;
 	bool ret = q->flags & XT_QUOTA_INVERT;
 
 	spin_lock_bh(&e->lock);
@@ -295,24 +316,21 @@ quota_mt2(const struct sk_buff *skb, struct xt_action_param *par)
 		 * While no_change is pointless in "grow" mode, we will
 		 * implement it here simply to have a consistent behavior.
 		 */
-		if (!(q->flags & XT_QUOTA_NO_CHANGE)) {
-			e->quota += (q->flags & XT_QUOTA_PACKET) ? 1 : skb->len;
-		}
-		ret = true;
+		if (!no_change)
+			e->quota += charge;
+		ret = true; /* note: does not respect inversion (bug??) */
 	} else {
-		if (e->quota >= skb->len) {
-			if (!(q->flags & XT_QUOTA_NO_CHANGE))
-				e->quota -= (q->flags & XT_QUOTA_PACKET) ? 1 : skb->len;
+		if (e->quota > charge) {
+			if (!no_change)
+				e->quota -= charge;
 			ret = !ret;
-		} else {
+		} else if (e->quota) {
 			/* We are transitioning, log that fact. */
-			if (e->quota) {
-				quota2_log(par->hooknum,
-					   skb,
-					   par->in,
-					   par->out,
-					   q->name);
-			}
+			quota2_log(par->hooknum,
+				   skb,
+				   par->in,
+				   par->out,
+				   q->name);
 			/* we do not allow even small packets from now on */
 			e->quota = 0;
 		}

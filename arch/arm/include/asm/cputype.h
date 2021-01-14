@@ -74,13 +74,15 @@
 #define ARM_CPU_PART_CORTEX_A12		0x4100c0d0
 #define ARM_CPU_PART_CORTEX_A17		0x4100c0e0
 #define ARM_CPU_PART_CORTEX_A15		0x4100c0f0
-#define ARM_CPU_PART_CORTEX_A53		0x4100d030
 #define ARM_CPU_PART_MASK		0xff00fff0
 
 #define ARM_CPU_XSCALE_ARCH_MASK	0xe000
 #define ARM_CPU_XSCALE_ARCH_V1		0x2000
 #define ARM_CPU_XSCALE_ARCH_V2		0x4000
 #define ARM_CPU_XSCALE_ARCH_V3		0x6000
+
+/* Qualcomm implemented cores */
+#define ARM_CPU_PART_SCORPION		0x510002d0
 
 extern unsigned int processor_id;
 
@@ -261,7 +263,7 @@ static inline int __attribute_const__ cpuid_feature_extract_field(u32 features,
 	int feature = (features >> field) & 15;
 
 	/* feature registers are signed values */
-	if (feature > 8)
+	if (feature > 7)
 		feature -= 16;
 
 	return feature;

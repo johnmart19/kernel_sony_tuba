@@ -1,7 +1,6 @@
 /*
  * Functions related to segment and merge handling
  */
-#define DEBUG 1
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/bio.h>
@@ -61,9 +60,6 @@ static unsigned int __blk_recalc_rq_segments(struct request_queue *q,
 					goto new_segment;
 				if (!BIOVEC_SEG_BOUNDARY(q, &bvprv, &bv))
 					goto new_segment;
-				if ((bvprv.bv_page != bv.bv_page) &&
-				    (bvprv.bv_page + 1) != bv.bv_page)
-					goto new_segment;
 
 				seg_size += bv.bv_len;
 				bvprv = bv;
@@ -101,13 +97,7 @@ void blk_recalc_rq_segments(struct request *rq)
 
 void blk_recount_segments(struct request_queue *q, struct bio *bio)
 {
-	unsigned short seg_cnt;
-
-	/* estimate segment number by bi_vcnt for non-cloned bio */
-	if (bio_flagged(bio, BIO_CLONED))
-		seg_cnt = bio_segments(bio);
-	else
-		seg_cnt = bio->bi_vcnt;
+	unsigned short seg_cnt = bio_segments(bio);
 
 	if (test_bit(QUEUE_FLAG_NO_SG_MERGE, &q->queue_flags) &&
 			(seg_cnt < queue_max_segments(q)))
@@ -175,9 +165,6 @@ __blk_segment_map_sg(struct request_queue *q, struct bio_vec *bvec,
 			goto new_segment;
 		if (!BIOVEC_SEG_BOUNDARY(q, bvprv, bvec))
 			goto new_segment;
-		if (((bvprv)->bv_page != bvec->bv_page) &&
-			((bvprv->bv_page + 1) != bvec->bv_page))
-			goto new_segment;
 
 		(*sg)->length += nbytes;
 	} else {
@@ -240,11 +227,9 @@ single_segment:
 	}
 
 	for_each_bio(bio)
-		bio_for_each_segment(bvec, bio, iter) {
+		bio_for_each_segment(bvec, bio, iter)
 			__blk_segment_map_sg(q, &bvec, sglist, &bvprv, sg,
 					     &nsegs, &cluster);
-			mt_pidlog_map_sg(&bvec, (bio->bi_rw & REQ_WRITE)?1:0);
-		}
 
 	return nsegs;
 }

@@ -749,12 +749,30 @@ static void arm_coherent_dma_free(struct device *dev, size_t size, void *cpu_add
 	__arm_dma_free(dev, size, cpu_addr, handle, attrs, true);
 }
 
+/*
+ * The whole dma_get_sgtable() idea is fundamentally unsafe - it seems
+ * that the intention is to allow exporting memory allocated via the
+ * coherent DMA APIs through the dma_buf API, which only accepts a
+ * scattertable.  This presents a couple of problems:
+ * 1. Not all memory allocated via the coherent DMA APIs is backed by
+ *    a struct page
+ * 2. Passing coherent DMA memory into the streaming APIs is not allowed
+ *    as we will try to flush the memory through a different alias to that
+ *    actually being used (and the flushes are redundant.)
+ */
 int arm_dma_get_sgtable(struct device *dev, struct sg_table *sgt,
 		 void *cpu_addr, dma_addr_t handle, size_t size,
 		 struct dma_attrs *attrs)
 {
-	struct page *page = pfn_to_page(dma_to_pfn(dev, handle));
+	unsigned long pfn = dma_to_pfn(dev, handle);
+	struct page *page;
 	int ret;
+
+	/* If the PFN is not valid, we do not have a struct page */
+	if (!pfn_valid(pfn))
+		return -ENXIO;
+
+	page = pfn_to_page(pfn);
 
 	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
 	if (unlikely(ret))
@@ -1001,6 +1019,8 @@ fs_initcall(dma_debug_do_init);
 #ifdef CONFIG_ARM_DMA_USE_IOMMU
 
 /* IOMMU */
+
+static int extend_iommu_mapping(struct dma_iommu_mapping *mapping);
 
 static inline dma_addr_t __alloc_iova(struct dma_iommu_mapping *mapping,
 				      size_t size)
@@ -1469,22 +1489,9 @@ static int __map_sg_chunk(struct device *dev, struct scatterlist *sg,
 	if (iova == DMA_ERROR_CODE)
 		return -ENOMEM;
 
-	/* for some pa do not have struct pages, we get the pa from sg_dma_address. */
 	for (count = 0, s = sg; count < (size >> PAGE_SHIFT); s = sg_next(s)) {
-		phys_addr_t phys;
-		unsigned int len;
-
-		/* we have set the iova to DMA_ERROR_CODE in __iommu_map_sg for which have pages */
-		if (!sg_dma_address(s) || sg_dma_address(s) == DMA_ERROR_CODE || !sg_dma_len(s)) {
-			phys = page_to_phys(sg_page(s));
-			len = PAGE_ALIGN(s->offset + s->length);
-		} else {
-			phys = sg_dma_address(s);
-			len = sg_dma_len(s);
-			/* clear the dma address after we get the pa. */
-			sg_dma_address(s) = DMA_ERROR_CODE;
-			sg_dma_len(s) = 0;
-		}
+		phys_addr_t phys = page_to_phys(sg_page(s));
+		unsigned int len = PAGE_ALIGN(s->offset + s->length);
 
 		if (!is_coherent &&
 			!dma_get_attr(DMA_ATTR_SKIP_CPU_SYNC, attrs))
@@ -1520,15 +1527,8 @@ static int __iommu_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	for (i = 1; i < nents; i++) {
 		s = sg_next(s);
 
-		/*
-		 * this is for pseudo m4u driver user, since some user space memory do not have
-		 * struct pages, and we need to store the pa in sg->dma_address, this is to avoid
-		 * the dma to modify this value.
-		 */
-		if (!sg_dma_address(s) || !sg_dma_len(s)) {
-			s->dma_address = DMA_ERROR_CODE;
-			s->dma_length = 0;
-		}
+		s->dma_address = DMA_ERROR_CODE;
+		s->dma_length = 0;
 
 		if (s->offset || (size & ~PAGE_MASK) || size + s->length > max) {
 			if (__map_sg_chunk(dev, start, size, &dma->dma_address,
@@ -1557,13 +1557,6 @@ static int __iommu_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 bad_mapping:
 	for_each_sg(sg, s, count, i)
 		__iommu_remove_mapping(dev, sg_dma_address(s), sg_dma_len(s));
-
-	/* tell the pseudo driver that the map have been failed. */
-	if (sg_dma_address(sg) && sg_dma_len(sg)) {
-		sg_dma_address(sg) = DMA_ERROR_CODE;
-		sg_dma_len(sg) = 0;
-	}
-
 	return 0;
 }
 
@@ -1940,7 +1933,7 @@ static void release_iommu_mapping(struct kref *kref)
 	kfree(mapping);
 }
 
-int extend_iommu_mapping(struct dma_iommu_mapping *mapping)
+static int extend_iommu_mapping(struct dma_iommu_mapping *mapping)
 {
 	int next_bitmap;
 
@@ -1957,7 +1950,6 @@ int extend_iommu_mapping(struct dma_iommu_mapping *mapping)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(extend_iommu_mapping);
 
 void arm_iommu_release_mapping(struct dma_iommu_mapping *mapping)
 {

@@ -237,6 +237,11 @@ struct dw_mci_slot {
 	int			last_detect_state;
 };
 
+struct dw_mci_tuning_data {
+	const u8 *blk_pattern;
+	unsigned int blksz;
+};
+
 /**
  * dw_mci driver data - dw-mshc implementation specific driver data.
  * @caps: mmc subsystem specified capabilities of the controller(s).
@@ -258,6 +263,7 @@ struct dw_mci_drv_data {
 	void		(*prepare_command)(struct dw_mci *host, u32 *cmdr);
 	void		(*set_ios)(struct dw_mci *host, struct mmc_ios *ios);
 	int		(*parse_dt)(struct dw_mci *host);
-	int		(*execute_tuning)(struct dw_mci_slot *slot);
+	int		(*execute_tuning)(struct dw_mci_slot *slot, u32 opcode,
+					struct dw_mci_tuning_data *tuning_data);
 };
 #endif /* _DW_MMC_H_ */

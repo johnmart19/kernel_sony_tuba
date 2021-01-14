@@ -142,15 +142,12 @@ static int topology_cpu_callback(struct notifier_block *nfb,
 	int rc = 0;
 
 	switch (action) {
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-		rc = topology_add_dev(cpu);
-		break;
 	case CPU_UP_PREPARE:
 	case CPU_UP_PREPARE_FROZEN:
+		rc = topology_add_dev(cpu);
+		break;
 	case CPU_UP_CANCELED:
 	case CPU_UP_CANCELED_FROZEN:
-		break;
 	case CPU_DEAD:
 	case CPU_DEAD_FROZEN:
 		topology_remove_dev(cpu);

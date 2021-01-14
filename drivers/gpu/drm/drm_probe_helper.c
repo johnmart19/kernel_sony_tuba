@@ -58,23 +58,28 @@
 static bool drm_kms_helper_poll = true;
 module_param_named(poll, drm_kms_helper_poll, bool, 0600);
 
-static enum drm_mode_status
-drm_mode_validate_flag(const struct drm_display_mode *mode,
-		       int flags)
+static void drm_mode_validate_flag(struct drm_connector *connector,
+				   int flags)
 {
-	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) &&
-	    !(flags & DRM_MODE_FLAG_INTERLACE))
-		return MODE_NO_INTERLACE;
+	struct drm_display_mode *mode;
 
-	if ((mode->flags & DRM_MODE_FLAG_DBLSCAN) &&
-	    !(flags & DRM_MODE_FLAG_DBLSCAN))
-		return MODE_NO_DBLESCAN;
+	if (flags == (DRM_MODE_FLAG_DBLSCAN | DRM_MODE_FLAG_INTERLACE |
+		      DRM_MODE_FLAG_3D_MASK))
+		return;
 
-	if ((mode->flags & DRM_MODE_FLAG_3D_MASK) &&
-	    !(flags & DRM_MODE_FLAG_3D_MASK))
-		return MODE_NO_STEREO;
+	list_for_each_entry(mode, &connector->modes, head) {
+		if ((mode->flags & DRM_MODE_FLAG_INTERLACE) &&
+				!(flags & DRM_MODE_FLAG_INTERLACE))
+			mode->status = MODE_NO_INTERLACE;
+		if ((mode->flags & DRM_MODE_FLAG_DBLSCAN) &&
+				!(flags & DRM_MODE_FLAG_DBLSCAN))
+			mode->status = MODE_NO_DBLESCAN;
+		if ((mode->flags & DRM_MODE_FLAG_3D_MASK) &&
+				!(flags & DRM_MODE_FLAG_3D_MASK))
+			mode->status = MODE_NO_STEREO;
+	}
 
-	return MODE_OK;
+	return;
 }
 
 static int drm_helper_probe_add_cmdline_mode(struct drm_connector *connector)
@@ -98,7 +103,7 @@ static int drm_helper_probe_single_connector_modes_merge_bits(struct drm_connect
 {
 	struct drm_device *dev = connector->dev;
 	struct drm_display_mode *mode;
-	const struct drm_connector_helper_funcs *connector_funcs =
+	struct drm_connector_helper_funcs *connector_funcs =
 		connector->helper_private;
 	int count = 0;
 	int mode_flags = 0;
@@ -146,6 +151,7 @@ static int drm_helper_probe_single_connector_modes_merge_bits(struct drm_connect
 			struct edid *edid = (struct edid *) connector->edid_blob_ptr->data;
 
 			count = drm_add_edid_modes(connector, edid);
+			drm_edid_to_eld(connector, edid);
 		} else
 			count = (*connector_funcs->get_modes)(connector);
 	}
@@ -158,22 +164,18 @@ static int drm_helper_probe_single_connector_modes_merge_bits(struct drm_connect
 
 	drm_mode_connector_list_update(connector, merge_type_bits);
 
+	if (maxX && maxY)
+		drm_mode_validate_size(dev, &connector->modes, maxX, maxY);
+
 	if (connector->interlace_allowed)
 		mode_flags |= DRM_MODE_FLAG_INTERLACE;
 	if (connector->doublescan_allowed)
 		mode_flags |= DRM_MODE_FLAG_DBLSCAN;
 	if (connector->stereo_allowed)
 		mode_flags |= DRM_MODE_FLAG_3D_MASK;
+	drm_mode_validate_flag(connector, mode_flags);
 
 	list_for_each_entry(mode, &connector->modes, head) {
-		mode->status = drm_mode_validate_basic(mode);
-
-		if (mode->status == MODE_OK)
-			mode->status = drm_mode_validate_size(mode, maxX, maxY);
-
-		if (mode->status == MODE_OK)
-			mode->status = drm_mode_validate_flag(mode, mode_flags);
-
 		if (mode->status == MODE_OK && connector_funcs->mode_valid)
 			mode->status = connector_funcs->mode_valid(connector,
 								   mode);
@@ -275,11 +277,14 @@ static void output_poll_execute(struct work_struct *work)
 	enum drm_connector_status old_status;
 	bool repoll = false, changed = false;
 
+	if (!dev->mode_config.poll_enabled)
+		return;
+
 	if (!drm_kms_helper_poll)
 		return;
 
 	mutex_lock(&dev->mode_config.mutex);
-	drm_for_each_connector(connector, dev) {
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
 
 		/* Ignore forced connectors. */
 		if (connector->force)
@@ -290,14 +295,14 @@ static void output_poll_execute(struct work_struct *work)
 		if (!connector->polled || connector->polled == DRM_CONNECTOR_POLL_HPD)
 			continue;
 
+		repoll = true;
+
 		old_status = connector->status;
 		/* if we are connected and don't want to poll for disconnect
 		   skip it */
 		if (old_status == connector_status_connected &&
 		    !(connector->polled & DRM_CONNECTOR_POLL_DISCONNECT))
 			continue;
-
-		repoll = true;
 
 		connector->status = connector->funcs->detect(connector, false);
 		if (old_status != connector->status) {
@@ -361,7 +366,7 @@ void drm_kms_helper_poll_enable(struct drm_device *dev)
 	if (!dev->mode_config.poll_enabled || !drm_kms_helper_poll)
 		return;
 
-	drm_for_each_connector(connector, dev) {
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
 		if (connector->polled & (DRM_CONNECTOR_POLL_CONNECT |
 					 DRM_CONNECTOR_POLL_DISCONNECT))
 			poll = true;
@@ -406,7 +411,11 @@ EXPORT_SYMBOL(drm_kms_helper_poll_init);
  */
 void drm_kms_helper_poll_fini(struct drm_device *dev)
 {
-	drm_kms_helper_poll_disable(dev);
+	if (!dev->mode_config.poll_enabled)
+		return;
+
+	dev->mode_config.poll_enabled = false;
+	cancel_delayed_work_sync(&dev->mode_config.output_poll_work);
 }
 EXPORT_SYMBOL(drm_kms_helper_poll_fini);
 
@@ -443,7 +452,7 @@ bool drm_helper_hpd_irq_event(struct drm_device *dev)
 		return false;
 
 	mutex_lock(&dev->mode_config.mutex);
-	drm_for_each_connector(connector, dev) {
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
 
 		/* Only handle HPD capable connectors. */
 		if (!(connector->polled & DRM_CONNECTOR_POLL_HPD))

@@ -37,11 +37,6 @@
 #include <linux/freezer.h>
 #include <linux/oom.h>
 #include <linux/numa.h>
-#ifdef CONFIG_HAS_EARLYSUSPEND
-#include <linux/earlysuspend.h>
-#endif
-#include <linux/cpumask.h>
-#include <linux/fb.h>
 
 #include <asm/tlbflush.h>
 #include "internal.h"
@@ -288,7 +283,8 @@ static inline struct rmap_item *alloc_rmap_item(void)
 {
 	struct rmap_item *rmap_item;
 
-	rmap_item = kmem_cache_zalloc(rmap_item_cache, GFP_KERNEL);
+	rmap_item = kmem_cache_zalloc(rmap_item_cache, GFP_KERNEL |
+						__GFP_NORETRY | __GFP_NOWARN);
 	if (rmap_item)
 		ksm_rmap_items++;
 	return rmap_item;
@@ -717,13 +713,13 @@ static int remove_stable_node(struct stable_node *stable_node)
 		return 0;
 	}
 
-	if (WARN_ON_ONCE(page_mapped(page))) {
-		/*
-		 * This should not happen: but if it does, just refuse to let
-		 * merge_across_nodes be switched - there is no need to panic.
-		 */
-		err = -EBUSY;
-	} else {
+	/*
+	 * Page could be still mapped if this races with __mmput() running in
+	 * between ksm_exit() and exit_mmap(). Just refuse to let
+	 * merge_across_nodes/max_page_sharing be switched.
+	 */
+	err = -EBUSY;
+	if (!page_mapped(page)) {
 		/*
 		 * The stable node did not yet appear stale to get_ksm_page(),
 		 * since that allows for an unmapped ksm page to be recognized
@@ -1479,8 +1475,22 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 	tree_rmap_item =
 		unstable_tree_search_insert(rmap_item, page, &tree_page);
 	if (tree_rmap_item) {
+		bool split;
+
 		kpage = try_to_merge_two_pages(rmap_item, page,
 						tree_rmap_item, tree_page);
+		/*
+		 * If both pages we tried to merge belong to the same compound
+		 * page, then we actually ended up increasing the reference
+		 * count of the same compound page twice, and split_huge_page
+		 * failed.
+		 * Here we set a flag if that happened, and we use it later to
+		 * try split_huge_page again. Since we call put_page right
+		 * afterwards, the reference count will be correct and
+		 * split_huge_page should succeed.
+		 */
+		split = PageTransCompound(page)
+			&& compound_head(page) == compound_head(tree_page);
 		put_page(tree_page);
 		if (kpage) {
 			/*
@@ -1505,6 +1515,20 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 				break_cow(tree_rmap_item);
 				break_cow(rmap_item);
 			}
+		} else if (split) {
+			/*
+			 * We are here if we tried to merge two pages and
+			 * failed because they both belonged to the same
+			 * compound page. We will split the page now, but no
+			 * merging will take place.
+			 * We do not want to add the cost of a full lock; if
+			 * the page is locked, it is better to skip it and
+			 * perhaps try again later.
+			 */
+			if (!trylock_page(page))
+				return;
+			split_huge_page(page);
+			unlock_page(page);
 		}
 	}
 }
@@ -1710,125 +1734,6 @@ static void ksm_do_scan(unsigned int scan_npages)
 	}
 }
 
-/*
- * LCH_ADD: ksm kernel control interface for run or stop
- * flags: 1(KSM_RUN_MERGE) sets ksmd running
- *            0 sets ksmd stop running
- * return: 0 success
- *            others error
- */
-#define KSM_KCTL_INTERFACE
-
-#ifdef KSM_KCTL_INTERFACE
-static ssize_t ksm_run_change(unsigned long flags)
-{
-	int err = 0;
-
-	if (flags > KSM_RUN_UNMERGE)
-		return -EINVAL;
-
-	/*
-	 * KSM_RUN_MERGE sets ksmd running, and 0 stops it running.
-	 * KSM_RUN_UNMERGE stops it running and unmerges all rmap_items,
-	 * breaking COW to free the pages_shared (but leaves mm_slots
-	 * on the list for when ksmd may be set running again).
-	 */
-
-	mutex_lock(&ksm_thread_mutex);
-	wait_while_offlining();
-	if (ksm_run != flags) {
-		ksm_run = flags;
-		if (flags & KSM_RUN_UNMERGE) {
-			set_current_oom_origin();
-			err = unmerge_and_remove_all_rmap_items();
-			clear_current_oom_origin();
-			if (err)
-				ksm_run = KSM_RUN_STOP;
-		}
-	}
-	mutex_unlock(&ksm_thread_mutex);
-
-	if (flags & KSM_RUN_MERGE)
-		wake_up_interruptible(&ksm_thread_wait);
-
-	return err;
-}
-
-static void ksm_tuning_pressure(void)
-{
-#if NR_CPUS > 1
-	if (bat_is_charger_exist() == KAL_TRUE) {
-		if (ksm_thread_sleep_millisecs == 20 &&
-			ksm_thread_pages_to_scan == 100)
-			return;
-		/*set to default value */
-		ksm_thread_sleep_millisecs = 20;
-		ksm_thread_pages_to_scan = 100;
-	} else {
-		int num_cpus = num_online_cpus();
-		int three_quater_cpus = ((3 * num_possible_cpus() * 10)/4 + 5)/10;
-		int one_half_cpus = num_possible_cpus() >> 1;
-
-		if (num_cpus >= three_quater_cpus) {
-			ksm_thread_sleep_millisecs = 20;
-			ksm_thread_pages_to_scan = 100;
-		} else if (num_cpus >= one_half_cpus) {
-			ksm_thread_sleep_millisecs = 3000;
-			ksm_thread_pages_to_scan = 200;
-		} else {
-			ksm_thread_sleep_millisecs = 10000;
-			ksm_thread_pages_to_scan = 200;
-		}
-	}
-#endif
-}
-
-#ifdef CONFIG_HAS_EARLYSUSPEND
-static void ksm_early_suspend(struct early_suspend *h)
-{
-	ksm_run_change(KSM_RUN_STOP);
-}
-
-static void ksm_late_resume(struct early_suspend *h)
-{
-	ksm_run_change(KSM_RUN_MERGE);
-}
-
-static struct early_suspend ksm_early_suspend_handler = {
-	.suspend = ksm_early_suspend,
-	.resume = ksm_late_resume,
-};
-#else /* no CONFIG_HAS_EARLYSUSPEND*/
-static int ksm_fb_notifier_callback(struct notifier_block *p,
-				unsigned long event, void *data)
-{
-	int blank;
-
-	if (event != FB_EVENT_BLANK)
-		return 0;
-
-	blank = *(int *)((struct fb_event *)data)->data;
-
-	if (blank == FB_BLANK_UNBLANK) { /*LCD ON*/
-		ksm_run_change(KSM_RUN_MERGE);
-	} else if (blank == FB_BLANK_POWERDOWN) { /*LCD OFF*/
-		ksm_run_change(KSM_RUN_STOP);
-	}
-
-	return 0;
-}
-
-static struct notifier_block ksm_fb_notifier = {
-	.notifier_call = ksm_fb_notifier_callback,
-}
-#endif
-#else /* no KSM_KCTL_INTERFACE*/
-static ssize_t ksm_run_change(unsigned long flags)
-{
-}
-#endif
-EXPORT_SYMBOL(ksm_run_change);
-
 static int ksmd_should_run(void)
 {
 	return (ksm_run & KSM_RUN_MERGE) && !list_empty(&ksm_mm_head.mm_list);
@@ -1837,19 +1742,13 @@ static int ksmd_should_run(void)
 static int ksm_scan_thread(void *nothing)
 {
 	set_freezable();
-	/* M: set KSMD's priority to the lowest value */
-	set_user_nice(current, 19);
-	/* set_user_nice(current, 5); */
+	set_user_nice(current, 5);
 
 	while (!kthread_should_stop()) {
 		mutex_lock(&ksm_thread_mutex);
 		wait_while_offlining();
-		if (ksmd_should_run()) {
-		#ifdef KSM_KCTL_INTERFACE
-			ksm_tuning_pressure();
-		#endif
+		if (ksmd_should_run())
 			ksm_do_scan(ksm_thread_pages_to_scan);
-		}
 		mutex_unlock(&ksm_thread_mutex);
 
 		try_to_freeze();
@@ -2461,21 +2360,6 @@ static int __init ksm_init(void)
 	/* There is no significance to this priority 100 */
 	hotplug_memory_notifier(ksm_memory_callback, 100);
 #endif
-
-#ifdef KSM_KCTL_INTERFACE
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	register_early_suspend(&ksm_early_suspend_handler);
-#else
-	err = fb_register_client(&ksm_fb_notifier);
-	if (err) {
-		pr_err("ksm: unable to register fb_notifier\n");
-		kthread_stop(ksm_thread);
-		sysfs_remove_group(mm_kobj, &ksm_attr_group);
-		goto out_free;
-	}
-#endif
-#endif
-
 	return 0;
 
 out_free:

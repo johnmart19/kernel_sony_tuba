@@ -34,6 +34,11 @@
 #include <linux/slab.h>
 #include "ubifs.h"
 
+static int try_read_node(const struct ubifs_info *c, void *buf, int type,
+			 int len, int lnum, int offs);
+static int fallible_read_node(struct ubifs_info *c, const union ubifs_key *key,
+			      struct ubifs_zbranch *zbr, void *node);
+
 /*
  * Returned codes of 'matches_name()' and 'fallible_matches_name()' functions.
  * @NAME_LESS: name corresponding to the first argument is less than second
@@ -403,7 +408,19 @@ static int tnc_read_node_nm(struct ubifs_info *c, struct ubifs_zbranch *zbr,
 		return 0;
 	}
 
-	err = ubifs_tnc_read_node(c, zbr, node);
+	if (c->replaying) {
+		err = fallible_read_node(c, &zbr->key, zbr, node);
+		/*
+		 * When the node was not found, return -ENOENT, 0 otherwise.
+		 * Negative return codes stay as-is.
+		 */
+		if (err == 0)
+			err = -ENOENT;
+		else if (err == 1)
+			err = 0;
+	} else {
+		err = ubifs_tnc_read_node(c, zbr, node);
+	}
 	if (err)
 		return err;
 
@@ -442,21 +459,15 @@ static int try_read_node(const struct ubifs_info *c, void *buf, int type,
 	int err, node_len;
 	struct ubifs_ch *ch = buf;
 	uint32_t crc, node_crc;
-#if defined(FEATURE_UBIFS_PERF_INDEX)
-	unsigned long long time1 = sched_clock();
-#endif
+
 	dbg_io("LEB %d:%d, %s, length %d", lnum, offs, dbg_ntype(type), len);
 
 	err = ubifs_leb_read(c, lnum, buf, offs, len, 1);
 	if (err) {
 		ubifs_err("cannot read node type %d from LEB %d:%d, error %d",
 			  type, lnum, offs, err);
-		/*MTK: return err;*/
+		return err;
 	}
-#if defined(FEATURE_UBIFS_PERF_INDEX)
-	if (type == UBIFS_DATA_NODE)
-		ubifs_perf_lrcount(sched_clock() - time1, len);
-#endif
 
 	if (le32_to_cpu(ch->magic) != UBIFS_NODE_MAGIC)
 		return 0;
@@ -2675,7 +2686,6 @@ out_unlock:
 int ubifs_tnc_remove_ino(struct ubifs_info *c, ino_t inum)
 {
 	union ubifs_key key1, key2;
-#if 0   /* MTK no need anymore*/
 	struct ubifs_dent_node *xent, *pxent = NULL;
 	struct qstr nm = { .name = NULL };
 
@@ -2724,7 +2734,6 @@ int ubifs_tnc_remove_ino(struct ubifs_info *c, ino_t inum)
 	}
 
 	kfree(pxent);
-#endif
 	lowest_ino_key(c, &key1, inum);
 	highest_ino_key(c, &key2, inum);
 
@@ -2775,7 +2784,11 @@ struct ubifs_dent_node *ubifs_tnc_next_ent(struct ubifs_info *c,
 	if (nm->name) {
 		if (err) {
 			/* Handle collisions */
-			err = resolve_collision(c, key, &znode, &n, nm);
+			if (c->replaying)
+				err = fallible_resolve_collision(c, key, &znode, &n,
+							 nm, 0);
+			else
+				err = resolve_collision(c, key, &znode, &n, nm);
 			dbg_tnc("rc returned %d, znode %p, n %d",
 				err, znode, n);
 			if (unlikely(err < 0))

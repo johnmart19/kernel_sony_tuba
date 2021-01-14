@@ -221,7 +221,7 @@
 
 #include "gadget_chips.h"
 #include "configfs.h"
-#include "usb_boost.h"
+
 
 /*------------------------------------------------------------------------*/
 
@@ -248,8 +248,6 @@ static struct usb_gadget_strings *fsg_strings_array[] = {
 	&fsg_stringtab,
 	NULL,
 };
-
-#define TOC_FORMAT2_SIZE		(11 * 3 + 4)
 
 /*-------------------------------------------------------------------------*/
 
@@ -309,8 +307,6 @@ struct fsg_common {
 	struct completion	thread_notifier;
 	struct task_struct	*thread_task;
 
-	/* Callback functions. */
-	const struct fsg_operations	*ops;
 	/* Gadget's private data. */
 	void			*private_data;
 
@@ -318,13 +314,9 @@ struct fsg_common {
 	 * Vendor (8 chars), product (16 chars), release (4
 	 * hexadecimal digits) and NUL byte
 	 */
-
-	char inquiry_string[INQUIRY_MAX_LEN];
-	/* LUN name for sysfs purpose */
-	char name[FSG_MAX_LUNS][LUN_NAME_LEN];
+	char inquiry_string[8 + 16 + 4 + 1];
 
 	struct kref		ref;
-	u8 bicr;
 };
 
 struct fsg_dev {
@@ -379,9 +371,6 @@ static void set_bulk_out_req_length(struct fsg_common *common,
 	if (rem > 0)
 		length += common->bulk_out_maxpacket - rem;
 	bh->outreq->length = length;
-
-	/* used by usb20 */
-	bh->outreq->short_not_ok = 1;
 }
 
 
@@ -409,7 +398,11 @@ static int fsg_set_halt(struct fsg_dev *fsg, struct usb_ep *ep)
 /* Caller must hold fsg->lock */
 static void wakeup_thread(struct fsg_common *common)
 {
-	smp_wmb();	/* ensure the write of bh->state is complete */
+	/*
+	 * Ensure the reading of thread_wakeup_needed
+	 * and the writing of bh->state are completed
+	 */
+	smp_mb();
 	/* Tell the main thread that something has happened */
 	common->thread_wakeup_needed = 1;
 	if (common->thread_task)
@@ -464,23 +457,13 @@ static void bulk_in_complete(struct usb_ep *ep, struct usb_request *req)
 	struct fsg_buffhd	*bh = req->context;
 
 	if (req->status || req->actual != req->length)
-		pr_debug("%s --> %d, %u/%u\n", __func__,
+		DBG(common, "%s --> %d, %u/%u\n", __func__,
 		    req->status, req->actual, req->length);
 	if (req->status == -ECONNRESET)		/* Request was cancelled */
 		usb_ep_fifo_flush(ep);
 
 	/* Hold the lock while we update the request and buffer states */
 	smp_wmb();
-	/*
-	 * Disconnect and completion might race each other and driver data
-	 * is set to NULL during ep disable. So, add a check if that is case.
-	 */
-	if (!common) {
-		bh->inreq_busy = 0;
-		bh->state = BUF_STATE_EMPTY;
-		return;
-	}
-
 	spin_lock(&common->lock);
 	bh->inreq_busy = 0;
 	bh->state = BUF_STATE_EMPTY;
@@ -552,14 +535,8 @@ static int fsg_setup(struct usb_function *f,
 				w_length != 1)
 			return -EDOM;
 		VDBG(fsg, "get max LUN\n");
-		if (fsg->common->bicr) {
-			/*When enable bicr, only share ONE LUN.*/
-			*(u8 *)req->buf = 0;
-		} else {
-			*(u8 *)req->buf = fsg->common->nluns - 1;
-		}
+		*(u8 *)req->buf = fsg->common->nluns - 1;
 
-		INFO(fsg, "get max LUN = %d\n", *(u8 *)req->buf);
 		/* Respond with data/status */
 		req->length = min((u16)1, w_length);
 		return ep0_queue(fsg->common);
@@ -640,19 +617,18 @@ static int sleep_thread(struct fsg_common *common, bool can_freeze)
 			rc = -EINTR;
 			break;
 		}
-		spin_lock_irq(&common->lock);
-		if (common->thread_wakeup_needed) {
-			spin_unlock_irq(&common->lock);
+		if (common->thread_wakeup_needed)
 			break;
-		}
-		spin_unlock_irq(&common->lock);
 		schedule();
 	}
 	__set_current_state(TASK_RUNNING);
-	spin_lock_irq(&common->lock);
 	common->thread_wakeup_needed = 0;
-	spin_unlock_irq(&common->lock);
-	smp_rmb();	/* ensure the latest bh->state is visible */
+
+	/*
+	 * Ensure the writing of thread_wakeup_needed
+	 * and the reading of bh->state are completed
+	 */
+	smp_mb();
 	return rc;
 }
 
@@ -712,17 +688,12 @@ static int do_read(struct fsg_common *common)
 			     curlun->file_length - file_offset);
 
 		/* Wait for the next buffer to become available */
-		spin_lock_irq(&common->lock);
 		bh = common->next_buffhd_to_fill;
 		while (bh->state != BUF_STATE_EMPTY) {
-			spin_unlock_irq(&common->lock);
 			rc = sleep_thread(common, false);
 			if (rc)
 				return rc;
-
-			spin_lock_irq(&common->lock);
 		}
-		spin_unlock_irq(&common->lock);
 
 		/*
 		 * If we were asked to read past the end of file,
@@ -734,15 +705,12 @@ static int do_read(struct fsg_common *common)
 			curlun->sense_data_info =
 					file_offset >> curlun->blkbits;
 			curlun->info_valid = 1;
-			spin_lock_irq(&common->lock);
 			bh->inreq->length = 0;
 			bh->state = BUF_STATE_FULL;
-			spin_unlock_irq(&common->lock);
 			break;
 		}
 
 		/* Perform the read */
-		usb_boost();
 		file_offset_tmp = file_offset;
 		nread = vfs_read(curlun->filp,
 				 (char __user *)bh->buf,
@@ -769,10 +737,8 @@ static int do_read(struct fsg_common *common)
 		 * equal to the buffer size, which is divisible by the
 		 * bulk-in maxpacket size.
 		 */
-		spin_lock_irq(&common->lock);
 		bh->inreq->length = nread;
 		bh->state = BUF_STATE_FULL;
-		spin_unlock_irq(&common->lock);
 
 		/* If an error occurred, report it and its position */
 		if (nread < amount) {
@@ -938,7 +904,6 @@ static int do_write(struct fsg_common *common)
 				goto empty_write;
 
 			/* Perform the write */
-			usb_boost();
 			file_offset_tmp = file_offset;
 			nwritten = vfs_write(curlun->filp,
 					     (char __user *)bh->buf,
@@ -1244,8 +1209,6 @@ static int do_read_toc(struct fsg_common *common, struct fsg_buffhd *bh)
 	int		msf = common->cmnd[1] & 0x02;
 	int		start_track = common->cmnd[6];
 	u8		*buf = (u8 *)bh->buf;
-	u8		format;
-	int		offset;
 
 	if ((common->cmnd[1] & ~0x02) != 0 ||	/* Mask away MSF */
 			start_track > 1) {
@@ -1253,55 +1216,18 @@ static int do_read_toc(struct fsg_common *common, struct fsg_buffhd *bh)
 		return -EINVAL;
 	}
 
-	format = common->cmnd[2] & 0x07;
-	/* SFF-8020i: When Format in Byte 2 is zero, then Byte 9 is used. */
-	if (format == 0)
-		format = (common->cmnd[9] >> 6) & 0x03;
+	memset(buf, 0, 20);
+	buf[1] = (20-2);		/* TOC data length */
+	buf[2] = 1;			/* First track number */
+	buf[3] = 1;			/* Last track number */
+	buf[5] = 0x16;			/* Data track, copying allowed */
+	buf[6] = 0x01;			/* Only track is number 1 */
+	store_cdrom_address(&buf[8], msf, 0);
 
-	if (format == 0) {
-		memset(buf, 0, 20);
-		buf[1] = (20-2);	/* TOC data length */
-		buf[2] = 1;		/* First track number */
-		buf[3] = 1;		/* Last track number */
-		buf[5] = 0x16;		/* Data track, copying allowed */
-		buf[6] = 0x01;		/* Only track is number 1 */
-		store_cdrom_address(&buf[8], msf, 0);
-
-		buf[13] = 0x16;		/* Lead-out track is data */
-		buf[14] = 0xAA;		/* Lead-out track number */
-		store_cdrom_address(&buf[16], msf, curlun->num_sectors);
-		return 20;
-	} else if (format == 0x02) {
-		memset(buf, 0, TOC_FORMAT2_SIZE);
-		buf[1] = (TOC_FORMAT2_SIZE-2);	/* TOC data length */
-		buf[2] = 1;			/* First Session Number */
-		buf[3] = 1;			/* Last Session Number */
-		offset = 4;
-
-		buf[offset] = 1;	/* Session Number */
-		buf[offset + 1] = 0x16;	/* Data track, copying allowed */
-		buf[offset + 2] = 0;	/* TNO */
-		buf[offset + 3] = 0xA0;	/* Point */
-		buf[offset + 8] = 1;	/* First track number */
-		buf[offset + 9] = 0;	/* Disc Type */
-		offset += 11;
-
-		buf[offset] = 1;	/* Session Number */
-		buf[offset + 1] = 0x16;	/* Data track, copying allowed */
-		buf[offset + 2] = 0;	/* TNO */
-		buf[offset + 3] = 0xA1;	/* Point */
-		buf[offset + 8] = 1;	/* Last track number */
-		offset += 11;
-
-		buf[offset] = 1;	/* Session Number */
-		buf[offset + 1] = 0x16;	/* Data track, copying allowed */
-		buf[offset + 2] = 0;	/* TNO */
-		buf[offset + 3] = 0xA2;	/* Point */
-		store_cdrom_address(&buf[offset + 7], msf, curlun->num_sectors);
-		return TOC_FORMAT2_SIZE;
-	}
-	curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
-	return -EINVAL;
+	buf[13] = 0x16;			/* Lead-out track is data */
+	buf[14] = 0xAA;			/* Lead-out track number */
+	store_cdrom_address(&buf[16], msf, curlun->num_sectors);
+	return 20;
 }
 
 static int do_mode_sense(struct fsg_common *common, struct fsg_buffhd *bh)
@@ -1458,8 +1384,7 @@ static int do_prevent_allow(struct fsg_common *common)
 		return -EINVAL;
 	}
 
-	/* don't flush if nofua is set */
-	if (!curlun->nofua && curlun->prevent_medium_removal && !prevent)
+	if (curlun->prevent_medium_removal && !prevent)
 		fsg_lun_fsync_sub(curlun);
 	curlun->prevent_medium_removal = prevent;
 	return 0;
@@ -1706,17 +1631,12 @@ static int send_status(struct fsg_common *common)
 	u32			sd, sdinfo = 0;
 
 	/* Wait for the next buffer to become available */
-	spin_lock_irq(&common->lock);
 	bh = common->next_buffhd_to_fill;
 	while (bh->state != BUF_STATE_EMPTY) {
-		spin_unlock_irq(&common->lock);
 		rc = sleep_thread(common, true);
 		if (rc)
 			return rc;
-
-		spin_lock_irq(&common->lock);
 	}
-	spin_unlock_irq(&common->lock);
 
 	if (curlun) {
 		sd = curlun->sense_data;
@@ -1727,7 +1647,7 @@ static int send_status(struct fsg_common *common)
 		sd = SS_LOGICAL_UNIT_NOT_SUPPORTED;
 
 	if (common->phase_error) {
-		ERROR(common, "sending phase-error status\n");
+		DBG(common, "sending phase-error status\n");
 		status = US_BULK_STAT_PHASE;
 		sd = SS_INVALID_COMMAND;
 	} else if (sd != SS_NO_SENSE) {
@@ -1793,8 +1713,6 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 		 * Carry out the command, but only transfer as much as
 		 * we are allowed.
 		 */
-		ERROR(common, "PHASE ERROR: data_size(%d) < data_size_from_cmnd(%d)\n",
-				common->data_size, common->data_size_from_cmnd);
 		common->data_size_from_cmnd = common->data_size;
 		common->phase_error = 1;
 	}
@@ -1803,8 +1721,6 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 
 	/* Conflicting data directions is a phase error */
 	if (common->data_dir != data_dir && common->data_size_from_cmnd > 0) {
-		ERROR(common, "PHASE ERROR: conflict data dir(%d,%d),data_size_from_cmnd(%d)\n",
-				common->data_dir, data_dir, common->data_size_from_cmnd);
 		common->phase_error = 1;
 		return -EINVAL;
 	}
@@ -1917,19 +1833,13 @@ static int do_scsi_command(struct fsg_common *common)
 	dump_cdb(common);
 
 	/* Wait for the next buffer to become available for data or status */
-	spin_lock_irq(&common->lock);
 	bh = common->next_buffhd_to_fill;
 	common->next_buffhd_to_drain = bh;
 	while (bh->state != BUF_STATE_EMPTY) {
-		spin_unlock_irq(&common->lock);
 		rc = sleep_thread(common, true);
 		if (rc)
 			return rc;
-
-		spin_lock_irq(&common->lock);
 	}
-	spin_unlock_irq(&common->lock);
-
 	common->phase_error = 0;
 	common->short_packet_received = 0;
 
@@ -2052,7 +1962,7 @@ static int do_scsi_command(struct fsg_common *common)
 		common->data_size_from_cmnd =
 			get_unaligned_be16(&common->cmnd[7]);
 		reply = check_command(common, 10, DATA_DIR_TO_HOST,
-				      (0x0f<<6) | (1<<1), 1,
+				      (7<<6) | (1<<1), 1,
 				      "READ TOC");
 		if (reply == 0)
 			reply = do_read_toc(common, bh);
@@ -2270,17 +2180,12 @@ static int get_next_command(struct fsg_common *common)
 	int			rc = 0;
 
 	/* Wait for the next buffer to become available */
-	spin_lock_irq(&common->lock);
 	bh = common->next_buffhd_to_fill;
 	while (bh->state != BUF_STATE_EMPTY) {
-		spin_unlock_irq(&common->lock);
 		rc = sleep_thread(common, true);
 		if (rc)
 			return rc;
-
-		spin_lock_irq(&common->lock);
 	}
-	spin_unlock_irq(&common->lock);
 
 	/* Queue a request to read a Bulk-only CBW */
 	set_bulk_out_req_length(common, bh, US_BULK_CB_WRAP_LEN);
@@ -2295,23 +2200,14 @@ static int get_next_command(struct fsg_common *common)
 	 */
 
 	/* Wait for the CBW to arrive */
-	spin_lock_irq(&common->lock);
 	while (bh->state != BUF_STATE_FULL) {
-		spin_unlock_irq(&common->lock);
 		rc = sleep_thread(common, true);
 		if (rc)
 			return rc;
-
-		spin_lock_irq(&common->lock);
 	}
-	spin_unlock_irq(&common->lock);
-
 	smp_rmb();
 	rc = fsg_is_set(common) ? received_cbw(common->fsg, bh) : -EIO;
-
-	spin_lock_irq(&common->lock);
 	bh->state = BUF_STATE_EMPTY;
-	spin_unlock_irq(&common->lock);
 
 	return rc;
 }
@@ -2454,7 +2350,6 @@ static void handle_exception(struct fsg_common *common)
 	enum fsg_state		old_state;
 	struct fsg_lun		*curlun;
 	unsigned int		exception_req_tag;
-	unsigned long		flags;
 
 	/*
 	 * Clear the existing signals.  Anything but SIGUSR1 is converted
@@ -2468,10 +2363,6 @@ static void handle_exception(struct fsg_common *common)
 		if (sig != SIGUSR1) {
 			if (common->state < FSG_STATE_EXIT)
 				DBG(common, "Main thread exiting on signal\n");
-
-			WARN_ON(1);
-			pr_err("%s: signal(%d) received from PID(%d) UID(%d)\n",
-				__func__, sig, info.si_pid, info.si_uid);
 			raise_exception(common, FSG_STATE_EXIT);
 		}
 	}
@@ -2490,13 +2381,10 @@ static void handle_exception(struct fsg_common *common)
 		/* Wait until everything is idle */
 		for (;;) {
 			int num_active = 0;
-			spin_lock_irq(&common->lock);
 			for (i = 0; i < common->fsg_num_buffers; ++i) {
 				bh = &common->buffhds[i];
 				num_active += bh->inreq_busy + bh->outreq_busy;
 			}
-			spin_unlock_irq(&common->lock);
-
 			if (num_active == 0)
 				break;
 			if (sleep_thread(common, true))
@@ -2514,7 +2402,7 @@ static void handle_exception(struct fsg_common *common)
 	 * Reset the I/O buffer states and pointers, the SCSI
 	 * state, and the exception.  Then invoke the handler.
 	 */
-	spin_lock_irqsave(&common->lock, flags);
+	spin_lock_irq(&common->lock);
 
 	for (i = 0; i < common->fsg_num_buffers; ++i) {
 		bh = &common->buffhds[i];
@@ -2540,7 +2428,7 @@ static void handle_exception(struct fsg_common *common)
 		}
 		common->state = FSG_STATE_IDLE;
 	}
-	spin_unlock_irqrestore(&common->lock, flags);
+	spin_unlock_irq(&common->lock);
 
 	/* Carry out any extra actions required for the exception */
 	switch (old_state) {
@@ -2608,6 +2496,7 @@ static void handle_exception(struct fsg_common *common)
 static int fsg_main_thread(void *common_)
 {
 	struct fsg_common	*common = common_;
+	int			i;
 
 	/*
 	 * Allow the thread to be killed by a signal, but set the signal mask
@@ -2669,22 +2558,16 @@ static int fsg_main_thread(void *common_)
 	common->thread_task = NULL;
 	spin_unlock_irq(&common->lock);
 
-	if (!common->ops || !common->ops->thread_exits
-	 || common->ops->thread_exits(common) < 0) {
-		struct fsg_lun **curlun_it = common->luns;
-		unsigned i = common->nluns;
+	/* Eject media from all LUNs */
 
-		down_write(&common->filesem);
-		for (; i--; ++curlun_it) {
-			struct fsg_lun *curlun = *curlun_it;
-			if (!curlun || !fsg_lun_is_open(curlun))
-				continue;
+	down_write(&common->filesem);
+	for (i = 0; i < common->nluns; i++) {
+		struct fsg_lun *curlun = common->luns[i];
 
+		if (curlun && fsg_lun_is_open(curlun))
 			fsg_lun_close(curlun);
-			curlun->unit_attention_data = SS_MEDIUM_NOT_PRESENT;
-		}
-		up_write(&common->filesem);
 	}
+	up_write(&common->filesem);
 
 	/* Let fsg_unbind() know the thread has exited */
 	complete_and_exit(&common->thread_notifier, 0);
@@ -2841,11 +2724,7 @@ int fsg_common_set_num_buffers(struct fsg_common *common, unsigned int n)
 		bh->next = bh + 1;
 		++bh;
 buffhds_first_it:
-#if defined(CONFIG_64BIT) && defined(CONFIG_MTK_LM_MODE)
-		bh->buf = kmalloc(FSG_BUFLEN, GFP_KERNEL | GFP_DMA);
-#else
 		bh->buf = kmalloc(FSG_BUFLEN, GFP_KERNEL);
-#endif
 		if (unlikely(!bh->buf))
 			goto error_release;
 	} while (--i);
@@ -2926,14 +2805,9 @@ void fsg_common_remove_luns(struct fsg_common *common)
 
 void fsg_common_free_luns(struct fsg_common *common)
 {
-	unsigned long flags;
-
 	fsg_common_remove_luns(common);
-	spin_lock_irqsave(&common->lock, flags);
 	kfree(common->luns);
 	common->luns = NULL;
-	common->nluns = 0;
-	spin_unlock_irqrestore(&common->lock, flags);
 }
 EXPORT_SYMBOL_GPL(fsg_common_free_luns);
 
@@ -2963,13 +2837,6 @@ int fsg_common_set_nluns(struct fsg_common *common, int nluns)
 }
 EXPORT_SYMBOL_GPL(fsg_common_set_nluns);
 
-void fsg_common_set_ops(struct fsg_common *common,
-			const struct fsg_operations *ops)
-{
-	common->ops = ops;
-}
-EXPORT_SYMBOL_GPL(fsg_common_set_ops);
-
 void fsg_common_free_buffers(struct fsg_common *common)
 {
 	_fsg_common_free_buffers(common->buffhds, common->fsg_num_buffers);
@@ -2986,7 +2853,6 @@ int fsg_common_set_cdev(struct fsg_common *common,
 	common->ep0 = cdev->gadget->ep0;
 	common->ep0req = cdev->req;
 	common->cdev = cdev;
-	common->bicr = 0;
 
 	us = usb_gstrings_attach(cdev, fsg_strings_array,
 				 ARRAY_SIZE(fsg_strings));
@@ -3168,25 +3034,6 @@ void fsg_common_set_inquiry_string(struct fsg_common *common, const char *vn,
 }
 EXPORT_SYMBOL_GPL(fsg_common_set_inquiry_string);
 
-int fsg_common_run_thread(struct fsg_common *common)
-{
-	common->state = FSG_STATE_IDLE;
-	/* Tell the thread to start working */
-	common->thread_task =
-		kthread_create(fsg_main_thread, common, "file-storage");
-	if (IS_ERR(common->thread_task)) {
-		common->state = FSG_STATE_TERMINATED;
-		return PTR_ERR(common->thread_task);
-	}
-
-	DBG(common, "I/O thread pid: %d\n", task_pid_nr(common->thread_task));
-
-	wake_up_process(common->thread_task);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(fsg_common_run_thread);
-
 static void fsg_common_release(struct kref *ref)
 {
 	struct fsg_common *common = container_of(ref, struct fsg_common, ref);
@@ -3195,6 +3042,7 @@ static void fsg_common_release(struct kref *ref)
 	if (common->state != FSG_STATE_TERMINATED) {
 		raise_exception(common, FSG_STATE_EXIT);
 		wait_for_completion(&common->thread_notifier);
+		common->thread_task = NULL;
 	}
 
 	if (likely(common->luns)) {
@@ -3222,82 +3070,6 @@ static void fsg_common_release(struct kref *ref)
 		kfree(common);
 }
 
-int fsg_sysfs_update(struct fsg_common *common, struct device *dev, bool create)
-{
-	int ret = 0, i;
-
-	pr_debug("%s(): common->nluns:%d\n", __func__, common->nluns);
-	if (create) {
-		for (i = 0; i < common->nluns; i++) {
-			if (i == 0)
-				snprintf(common->name[i], 8, "lun");
-			else
-				snprintf(common->name[i], 8, "lun%d", i-1);
-			ret = sysfs_create_link(&dev->kobj,
-					&common->luns[i]->dev.kobj,
-					common->name[i]);
-			if (ret) {
-				pr_err("%s(): failed creating sysfs:%d %s)\n",
-						__func__, i, common->name[i]);
-				goto remove_sysfs;
-			}
-		}
-	} else {
-		i = common->nluns;
-		goto remove_sysfs;
-	}
-
-	return 0;
-
-remove_sysfs:
-	for (; i > 0; i--) {
-		pr_debug("%s(): delete sysfs for lun(id:%d)(name:%s)\n",
-					__func__, i, common->name[i-1]);
-		sysfs_remove_link(&dev->kobj, common->name[i-1]);
-	}
-
-	return ret;
-}
-
-ssize_t fsg_inquiry_show(struct fsg_common *common, char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%s\n", common->inquiry_string);
-}
-ssize_t fsg_inquiry_store(struct fsg_common *common, const char *buf, size_t size)
-{
-	if (size >= sizeof(common->inquiry_string))
-		return -EINVAL;
-
-	if (sscanf(buf, "%28s", common->inquiry_string) != 1)
-		return -EINVAL;
-	return size;
-}
-
-ssize_t fsg_bicr_show(struct fsg_common *common, char *buf)
-{
-	return sprintf(buf, "%d\n", common->bicr);
-}
-ssize_t fsg_bicr_store(struct fsg_common *common, const char *buf, size_t size)
-{
-	int ret;
-
-	ret = kstrtou8(buf, 10, &common->bicr);
-	if (ret)
-		return -EINVAL;
-
-	/* Set Lun[0] is a CDROM when enable bicr.*/
-	if (!strcmp(buf, "1"))
-		common->luns[0]->cdrom = 1;
-	else {
-		common->luns[0]->cdrom = 0;
-		common->luns[0]->blkbits = 0;
-		common->luns[0]->blksize = 0;
-		common->luns[0]->num_sectors = 0;
-	}
-
-	return size;
-}
-
 
 /*-------------------------------------------------------------------------*/
 
@@ -3318,9 +3090,21 @@ static int fsg_bind(struct usb_configuration *c, struct usb_function *f)
 		if (ret)
 			return ret;
 		fsg_common_set_inquiry_string(fsg->common, NULL, NULL);
-		ret = fsg_common_run_thread(fsg->common);
-		if (ret)
+	}
+
+	if (!fsg->common->thread_task) {
+		fsg->common->state = FSG_STATE_IDLE;
+		fsg->common->thread_task =
+			kthread_create(fsg_main_thread, fsg->common, "file-storage");
+		if (IS_ERR(fsg->common->thread_task)) {
+			int ret = PTR_ERR(fsg->common->thread_task);
+			fsg->common->thread_task = NULL;
+			fsg->common->state = FSG_STATE_TERMINATED;
 			return ret;
+		}
+		DBG(fsg->common, "I/O thread pid: %d\n",
+		    task_pid_nr(fsg->common->thread_task));
+		wake_up_process(fsg->common->thread_task);
 	}
 
 	fsg->gadget = gadget;
@@ -3848,13 +3632,10 @@ void fsg_config_from_params(struct fsg_config *cfg,
 	cfg->nluns =
 		min(params->luns ?: (params->file_count ?: 1u),
 		    (unsigned)FSG_MAX_LUNS);
-
 	for (i = 0, lun = cfg->luns; i < cfg->nluns; ++i, ++lun) {
 		lun->ro = !!params->ro[i];
 		lun->cdrom = !!params->cdrom[i];
 		lun->removable = !!params->removable[i];
-		/* add nofua flag support */
-		lun->nofua = !!params->nofua[i];
 		lun->filename =
 			params->file_count > i && params->file[i][0]
 			? params->file[i]

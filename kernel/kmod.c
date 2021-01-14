@@ -28,6 +28,7 @@
 #include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
+#include <linux/fs_struct.h>
 #include <linux/workqueue.h>
 #include <linux/security.h>
 #include <linux/mount.h>
@@ -127,7 +128,7 @@ out:
  * they requested is now available not blindly invoke it.
  *
  * If module auto-loading support is disabled then this function
- * becomes a no-operation.
+ * simply returns -ENOENT.
  */
 int __request_module(bool wait, const char *fmt, ...)
 {
@@ -148,7 +149,7 @@ int __request_module(bool wait, const char *fmt, ...)
 	WARN_ON_ONCE(wait && current_is_async());
 
 	if (!modprobe_path[0])
-		return 0;
+		return -ENOENT;
 
 	va_start(args, fmt);
 	ret = vsnprintf(module_name, MODULE_NAME_LEN, fmt, args);
@@ -233,6 +234,14 @@ static int ____call_usermodehelper(void *data)
 
 	/* We can run anywhere, unlike our parent keventd(). */
 	set_cpus_allowed_ptr(current, cpu_all_mask);
+
+	/*
+	 * Initial kernel threads share ther FS with init, in order to
+	 * get the init root directory. But we've now created a new
+	 * thread that is going to execve a user process and has its own
+	 * 'struct fs_struct'. Reset umask to the default.
+	 */
+	current->fs->umask = 0022;
 
 	/*
 	 * Our parent is keventd, which runs with elevated scheduling priority.
@@ -451,7 +460,6 @@ void __usermodehelper_set_disable_depth(enum umh_disable_depth depth)
 	wake_up(&usermodehelper_disabled_waitq);
 	up_write(&umhelper_sem);
 }
-EXPORT_SYMBOL_GPL(__usermodehelper_set_disable_depth);
 
 /**
  * __usermodehelper_disable - Prevent new helpers from being started.
@@ -485,7 +493,6 @@ int __usermodehelper_disable(enum umh_disable_depth depth)
 	__usermodehelper_set_disable_depth(UMH_ENABLED);
 	return -EAGAIN;
 }
-EXPORT_SYMBOL_GPL(__usermodehelper_disable);
 
 static void helper_lock(void)
 {

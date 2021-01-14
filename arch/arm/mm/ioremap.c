@@ -26,7 +26,6 @@
 #include <linux/vmalloc.h>
 #include <linux/io.h>
 #include <linux/sizes.h>
-#include <mt-plat/mtk_hooks.h>
 
 #include <asm/cp15.h>
 #include <asm/cputype.h>
@@ -375,9 +374,6 @@ void __iomem * (*arch_ioremap_caller)(phys_addr_t, size_t,
 void __iomem *
 __arm_ioremap(phys_addr_t phys_addr, size_t size, unsigned int mtype)
 {
-	if (ioremap_debug_hook_func)
-		ioremap_debug_hook_func(phys_addr, size, mtype);
-
 	return arch_ioremap_caller(phys_addr, size, mtype,
 		__builtin_return_address(0));
 }
@@ -451,7 +447,7 @@ void pci_ioremap_set_mem_type(int mem_type)
 
 int pci_ioremap_io(unsigned int offset, phys_addr_t phys_addr)
 {
-	BUG_ON(offset + SZ_64K > IO_SPACE_LIMIT);
+	BUG_ON(offset + SZ_64K - 1 > IO_SPACE_LIMIT);
 
 	return ioremap_page_range(PCI_IO_VIRT_BASE + offset,
 				  PCI_IO_VIRT_BASE + offset + SZ_64K,

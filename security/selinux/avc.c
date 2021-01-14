@@ -733,21 +733,6 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 	if (ad->selinux_audit_data->denied) {
 		audit_log_format(ab, " permissive=%u",
 				 ad->selinux_audit_data->result ? 0 : 1);
-#ifdef CONFIG_MTK_SELINUX_AEE_WARNING
-		{
-			struct nlmsghdr *nlh;
-			char *selinux_data;
-
-			if (ab) {
-				nlh = nlmsg_hdr(audit_get_skb(ab));
-				selinux_data = nlmsg_data(nlh);
-				if (nlh->nlmsg_type != AUDIT_EOE) {
-					if (nlh->nlmsg_type == 1400)
-						mtk_audit_hook(selinux_data);
-				}
-			}
-		}
-#endif
 	}
 }
 
@@ -886,7 +871,7 @@ static int avc_update_node(u32 event, u32 perms, u8 driver, u8 xperm, u32 ssid,
 	if (orig->ae.xp_node) {
 		rc = avc_xperms_populate(node, orig->ae.xp_node);
 		if (rc) {
-			kmem_cache_free(avc_node_cachep, node);
+			avc_node_kill(node);
 			goto out_unlock;
 		}
 	}

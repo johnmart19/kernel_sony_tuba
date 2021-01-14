@@ -209,11 +209,11 @@ static int serial_install(struct tty_driver *driver, struct tty_struct *tty)
 
 	return retval;
 
-error_init_termios:
+ error_init_termios:
 	usb_autopm_put_interface(serial->interface);
-error_get_interface:
+ error_get_interface:
 	module_put(serial->type->driver.owner);
-error_module_get:
+ error_module_get:
 	usb_serial_put(serial);
 	mutex_unlock(&serial->disc_mutex);
 	return retval;
@@ -314,10 +314,7 @@ static void serial_cleanup(struct tty_struct *tty)
 	serial = port->serial;
 	owner = serial->type->driver.owner;
 
-	mutex_lock(&serial->disc_mutex);
-	if (!serial->disconnected)
-		usb_autopm_put_interface(serial->interface);
-	mutex_unlock(&serial->disc_mutex);
+	usb_autopm_put_interface(serial->interface);
 
 	usb_serial_put(serial);
 	module_put(owner);
@@ -485,11 +482,11 @@ static int serial_proc_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations serial_proc_fops = {
-	.owner = THIS_MODULE,
-	.open = serial_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
+	.owner		= THIS_MODULE,
+	.open		= serial_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
 };
 
 static int serial_tiocmget(struct tty_struct *tty)
@@ -616,7 +613,7 @@ static struct usb_serial *create_serial(struct usb_device *dev,
 }
 
 static const struct usb_device_id *match_dynamic_id(struct usb_interface *intf,
-						    struct usb_serial_driver *drv)
+					    struct usb_serial_driver *drv)
 {
 	struct usb_dynid *dynid;
 
@@ -1061,7 +1058,8 @@ static int usb_serial_probe(struct usb_interface *interface,
 
 	serial->disconnected = 0;
 
-	usb_serial_console_init(serial->port[0]->minor);
+	if (num_ports > 0)
+		usb_serial_console_init(serial->port[0]->minor);
 exit:
 	module_put(type->driver.owner);
 	return 0;
@@ -1179,24 +1177,24 @@ static int usb_serial_reset_resume(struct usb_interface *intf)
 }
 
 static const struct tty_operations serial_ops = {
-	.open = serial_open,
-	.close = serial_close,
-	.write = serial_write,
-	.hangup = serial_hangup,
-	.write_room = serial_write_room,
-	.ioctl = serial_ioctl,
-	.set_termios = serial_set_termios,
-	.throttle = serial_throttle,
-	.unthrottle = serial_unthrottle,
-	.break_ctl = serial_break,
-	.chars_in_buffer = serial_chars_in_buffer,
-	.wait_until_sent = serial_wait_until_sent,
-	.tiocmget = serial_tiocmget,
-	.tiocmset = serial_tiocmset,
-	.get_icount = serial_get_icount,
-	.cleanup = serial_cleanup,
-	.install = serial_install,
-	.proc_fops = &serial_proc_fops,
+	.open =			serial_open,
+	.close =		serial_close,
+	.write =		serial_write,
+	.hangup =		serial_hangup,
+	.write_room =		serial_write_room,
+	.ioctl =		serial_ioctl,
+	.set_termios =		serial_set_termios,
+	.throttle =		serial_throttle,
+	.unthrottle =		serial_unthrottle,
+	.break_ctl =		serial_break,
+	.chars_in_buffer =	serial_chars_in_buffer,
+	.wait_until_sent =	serial_wait_until_sent,
+	.tiocmget =		serial_tiocmget,
+	.tiocmset =		serial_tiocmset,
+	.get_icount =		serial_get_icount,
+	.cleanup =		serial_cleanup,
+	.install =		serial_install,
+	.proc_fops =		&serial_proc_fops,
 };
 
 
@@ -1204,13 +1202,13 @@ struct tty_driver *usb_serial_tty_driver;
 
 /* Driver structure we register with the USB core */
 static struct usb_driver usb_serial_driver = {
-	.name = "usbserial",
-	.probe = usb_serial_probe,
-	.disconnect = usb_serial_disconnect,
-	.suspend = usb_serial_suspend,
-	.resume = usb_serial_resume,
-	.no_dynamic_id = 1,
-	.supports_autosuspend = 1,
+	.name =		"usbserial",
+	.probe =	usb_serial_probe,
+	.disconnect =	usb_serial_disconnect,
+	.suspend =	usb_serial_suspend,
+	.resume =	usb_serial_resume,
+	.no_dynamic_id =	1,
+	.supports_autosuspend =	1,
 };
 
 static int __init usb_serial_init(void)
@@ -1231,7 +1229,7 @@ static int __init usb_serial_init(void)
 	usb_serial_tty_driver->driver_name = "usbserial";
 	usb_serial_tty_driver->name = "ttyUSB";
 	usb_serial_tty_driver->major = USB_SERIAL_TTY_MAJOR;
-	usb_serial_tty_driver->minor_start = 1;
+	usb_serial_tty_driver->minor_start = 0;
 	usb_serial_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
 	usb_serial_tty_driver->subtype = SERIAL_TYPE_NORMAL;
 	usb_serial_tty_driver->flags = TTY_DRIVER_REAL_RAW |
@@ -1336,6 +1334,9 @@ static int usb_serial_register(struct usb_serial_driver *driver)
 		return -EINVAL;
 	}
 
+	/* Prevent individual ports from being unbound. */
+	driver->driver.suppress_bind_attrs = true;
+
 	usb_serial_operations_init(driver);
 
 	/* Add this device to our list of devices */
@@ -1416,7 +1417,7 @@ int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[]
 
 	rc = usb_register(udriver);
 	if (rc)
-		return rc;
+		goto failed_usb_register;
 
 	for (sd = serial_drivers; *sd; ++sd) {
 		(*sd)->usb_driver = udriver;
@@ -1430,10 +1431,12 @@ int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[]
 	rc = driver_attach(&udriver->drvwrap.driver);
 	return 0;
 
-failed:
+ failed:
 	while (sd-- > serial_drivers)
 		usb_serial_deregister(*sd);
 	usb_deregister(udriver);
+failed_usb_register:
+	kfree(udriver);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(usb_serial_register_drivers);

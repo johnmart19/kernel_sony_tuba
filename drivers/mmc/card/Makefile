@@ -8,7 +8,3 @@ obj-$(CONFIG_MMC_TEST)		+= mmc_test.o
 
 obj-$(CONFIG_SDIO_UART)		+= sdio_uart.o
 
-obj-$(CONFIG_MMC_FFU)		+= ffu.o
-
-obj-$(CONFIG_MMC_BLOCK_IO_LOG)  += mt_mmc_block.o
-

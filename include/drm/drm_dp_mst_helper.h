@@ -28,7 +28,7 @@
 struct drm_dp_mst_branch;
 
 /**
- * struct drm_dp_vcpi - Virtual Channel Payload Identifier
+ * struct drm_dp_vcpi - Virtual Channel Payload Identifer
  * @vcpi: Virtual channel ID.
  * @pbn: Payload Bandwidth Number for this channel
  * @aligned_pbn: PBN aligned with slot size
@@ -300,7 +300,7 @@ struct drm_dp_resource_status_notify {
 
 struct drm_dp_query_payload_ack_reply {
 	u8 port_number;
-	u8 allocated_pbn;
+	u16 allocated_pbn;
 };
 
 struct drm_dp_sideband_msg_req_body {
@@ -370,7 +370,7 @@ struct drm_dp_sideband_msg_tx {
 struct drm_dp_mst_topology_mgr;
 struct drm_dp_mst_topology_cbs {
 	/* create a connector for a port */
-	struct drm_connector *(*add_connector)(struct drm_dp_mst_topology_mgr *mgr, struct drm_dp_mst_port *port, const char *path);
+	struct drm_connector *(*add_connector)(struct drm_dp_mst_topology_mgr *mgr, struct drm_dp_mst_port *port, char *path);
 	void (*destroy_connector)(struct drm_dp_mst_topology_mgr *mgr,
 				  struct drm_connector *connector);
 	void (*hotplug)(struct drm_dp_mst_topology_mgr *mgr);
@@ -441,9 +441,7 @@ struct drm_dp_mst_topology_mgr {
 	   the mstb tx_slots and txmsg->state once they are queued */
 	struct mutex qlock;
 	struct list_head tx_msg_downq;
-	struct list_head tx_msg_upq;
 	bool tx_down_in_progress;
-	bool tx_up_in_progress;
 
 	/* payload info + lock for it */
 	struct mutex payload_lock;

@@ -368,7 +368,7 @@ static int drm_dp_dpcd_access(struct drm_dp_aux *aux, u8 request,
 {
 	struct drm_dp_aux_msg msg;
 	unsigned int retry;
-	int err;
+	int err = 0;
 
 	memset(&msg, 0, sizeof(msg));
 	msg.address = offset;
@@ -376,32 +376,34 @@ static int drm_dp_dpcd_access(struct drm_dp_aux *aux, u8 request,
 	msg.buffer = buffer;
 	msg.size = size;
 
+	mutex_lock(&aux->hw_mutex);
+
 	/*
 	 * The specification doesn't give any recommendation on how often to
-	 * retry native transactions, so retry 7 times like for I2C-over-AUX
-	 * transactions.
+	 * retry native transactions. We used to retry 7 times like for
+	 * aux i2c transactions but real world devices this wasn't
+	 * sufficient, bump to 32 which makes Dell 4k monitors happier.
 	 */
-	for (retry = 0; retry < 7; retry++) {
+	for (retry = 0; retry < 32; retry++) {
 
-		mutex_lock(&aux->hw_mutex);
 		err = aux->transfer(aux, &msg);
-		mutex_unlock(&aux->hw_mutex);
 		if (err < 0) {
 			if (err == -EBUSY)
 				continue;
 
-			return err;
+			goto unlock;
 		}
 
 
 		switch (msg.reply & DP_AUX_NATIVE_REPLY_MASK) {
 		case DP_AUX_NATIVE_REPLY_ACK:
 			if (err < size)
-				return -EPROTO;
-			return err;
+				err = -EPROTO;
+			goto unlock;
 
 		case DP_AUX_NATIVE_REPLY_NACK:
-			return -EIO;
+			err = -EIO;
+			goto unlock;
 
 		case DP_AUX_NATIVE_REPLY_DEFER:
 			usleep_range(400, 500);
@@ -410,7 +412,11 @@ static int drm_dp_dpcd_access(struct drm_dp_aux *aux, u8 request,
 	}
 
 	DRM_DEBUG_KMS("too many retries, giving up\n");
-	return -EIO;
+	err = -EIO;
+
+unlock:
+	mutex_unlock(&aux->hw_mutex);
+	return err;
 }
 
 /**
@@ -590,7 +596,7 @@ static u32 drm_dp_i2c_functionality(struct i2c_adapter *adapter)
  */
 static int drm_dp_i2c_do_msg(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
 {
-	unsigned int retry, defer_i2c;
+	unsigned int retry;
 	int err;
 
 	/*
@@ -598,10 +604,8 @@ static int drm_dp_i2c_do_msg(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
 	 * is required to retry at least seven times upon receiving AUX_DEFER
 	 * before giving up the AUX transaction.
 	 */
-	for (retry = 0, defer_i2c = 0; retry < (7 + defer_i2c); retry++) {
-		mutex_lock(&aux->hw_mutex);
+	for (retry = 0; retry < 7; retry++) {
 		err = aux->transfer(aux, msg);
-		mutex_unlock(&aux->hw_mutex);
 		if (err < 0) {
 			if (err == -EBUSY)
 				continue;
@@ -624,7 +628,7 @@ static int drm_dp_i2c_do_msg(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
 			return -EREMOTEIO;
 
 		case DP_AUX_NATIVE_REPLY_DEFER:
-			DRM_DEBUG_KMS("native defer\n");
+			DRM_DEBUG_KMS("native defer");
 			/*
 			 * We could check for I2C bit rate capabilities and if
 			 * available adjust this interval. We could also be
@@ -654,18 +658,10 @@ static int drm_dp_i2c_do_msg(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
 
 		case DP_AUX_I2C_REPLY_NACK:
 			DRM_DEBUG_KMS("I2C nack\n");
-			aux->i2c_nack_count++;
 			return -EREMOTEIO;
 
 		case DP_AUX_I2C_REPLY_DEFER:
 			DRM_DEBUG_KMS("I2C defer\n");
-			/* DP Compliance Test 4.2.2.5 Requirement:
-			 * Must have at least 7 retries for I2C defers on the
-			 * transaction to pass this test
-			 */
-			aux->i2c_defer_count++;
-			if (defer_i2c < 7)
-				defer_i2c++;
 			usleep_range(400, 500);
 			continue;
 
@@ -688,6 +684,8 @@ static int drm_dp_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs,
 	int err = 0;
 
 	memset(&msg, 0, sizeof(msg));
+
+	mutex_lock(&aux->hw_mutex);
 
 	for (i = 0; i < num; i++) {
 		msg.address = msgs[i].addr;
@@ -732,6 +730,8 @@ static int drm_dp_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs,
 	msg.buffer = NULL;
 	msg.size = 0;
 	(void)drm_dp_i2c_do_msg(aux, &msg);
+
+	mutex_unlock(&aux->hw_mutex);
 
 	return err;
 }

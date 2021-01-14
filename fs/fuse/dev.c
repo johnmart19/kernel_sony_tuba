@@ -7,9 +7,6 @@
 */
 
 #include "fuse_i.h"
-//[CEI comment] fuse: Add support for passthrough read/write
-#include "fuse_passthrough.h"
-#include "mt_fuse.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -512,26 +509,10 @@ static void __fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
 	spin_unlock(&fc->lock);
 }
 
-void fuse_request_send_ex(struct fuse_conn *fc, struct fuse_req *req,
-	__u32 size)
-{
-	FUSE_IOLOG_INIT(size, req->in.h.opcode);
-	req->isreply = 1;
-	FUSE_IOLOG_START();
-	__fuse_request_send(fc, req);
-	FUSE_IOLOG_END();
-	FUSE_IOLOG_PRINT();
-}
-EXPORT_SYMBOL_GPL(fuse_request_send_ex);
-
 void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
 {
-	//[CEI comment] fuse: Add support for passthrough read/write
-	int ret;
-	fuse_request_send_ex(fc, req, 0);
-	ret = req->out.h.error;
-	if (!ret && req->passthrough_filp != NULL)
-		req->out.passthrough_filp = req->passthrough_filp;
+	req->isreply = 1;
+	__fuse_request_send(fc, req);
 }
 EXPORT_SYMBOL_GPL(fuse_request_send);
 
@@ -563,21 +544,10 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	}
 }
 
-void fuse_request_send_background_ex(struct fuse_conn *fc, struct fuse_req *req,
-	__u32 size)
-{
-	FUSE_IOLOG_INIT(size, req->in.h.opcode);
-	FUSE_IOLOG_START();
-	req->isreply = 1;
-	fuse_request_send_nowait(fc, req);
-	FUSE_IOLOG_END();
-	FUSE_IOLOG_PRINT();
-}
-EXPORT_SYMBOL_GPL(fuse_request_send_background_ex);
-
 void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
 {
-	fuse_request_send_background_ex(fc, req, 0);
+	req->isreply = 1;
+	fuse_request_send_nowait(fc, req);
 }
 EXPORT_SYMBOL_GPL(fuse_request_send_background);
 
@@ -806,7 +776,6 @@ static int fuse_check_page(struct page *page)
 {
 	if (page_mapcount(page) ||
 	    page->mapping != NULL ||
-	    page_count(page) != 1 ||
 	    (page->flags & PAGE_FLAGS_CHECK_AT_PREP &
 	     ~(1 << PG_locked |
 	       1 << PG_referenced |
@@ -1663,7 +1632,7 @@ static int fuse_retrieve(struct fuse_conn *fc, struct inode *inode,
 	offset = outarg->offset & ~PAGE_CACHE_MASK;
 	file_size = i_size_read(inode);
 
-	num = outarg->size;
+	num = min(outarg->size, fc->max_write);
 	if (outarg->offset > file_size)
 		num = 0;
 	else if (outarg->offset + num > file_size)
@@ -1680,7 +1649,6 @@ static int fuse_retrieve(struct fuse_conn *fc, struct inode *inode,
 	req->in.h.nodeid = outarg->nodeid;
 	req->in.numargs = 2;
 	req->in.argpages = 1;
-	req->page_descs[0].offset = offset;
 	req->end = fuse_retrieve_end;
 
 	index = outarg->offset >> PAGE_CACHE_SHIFT;
@@ -1695,6 +1663,7 @@ static int fuse_retrieve(struct fuse_conn *fc, struct inode *inode,
 
 		this_num = min_t(unsigned, num, PAGE_CACHE_SIZE - offset);
 		req->pages[req->num_pages] = page;
+		req->page_descs[req->num_pages].offset = offset;
 		req->page_descs[req->num_pages].length = this_num;
 		req->num_pages++;
 
@@ -1710,8 +1679,10 @@ static int fuse_retrieve(struct fuse_conn *fc, struct inode *inode,
 	req->in.args[1].size = total_len;
 
 	err = fuse_request_send_notify_reply(fc, req, outarg->notify_unique);
-	if (err)
+	if (err) {
 		fuse_retrieve_end(fc, req);
+		fuse_put_request(fc, req);
+	}
 
 	return err;
 }
@@ -1899,14 +1870,14 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 	spin_unlock(&fc->lock);
 
 	err = copy_out_args(cs, &req->out, nbytes);
-	if (req->in.h.opcode == FUSE_CANONICAL_PATH && req->out.h.error == 0) {
-		req->out.h.error = kern_path((char *)req->out.args[0].value, 0,
-							req->canonical_path);
+	if (req->in.h.opcode == FUSE_CANONICAL_PATH) {
+		char *path = (char *)req->out.args[0].value;
+
+		path[req->out.args[0].size - 1] = 0;
+		req->out.h.error = kern_path(path, 0, req->canonical_path);
 	}
 	fuse_copy_finish(cs);
 
-	//[CEI comment] fuse: Add support for passthrough read/write
-	fuse_setup_passthrough(fc, req);
 	spin_lock(&fc->lock);
 	req->locked = 0;
 	if (!err) {
@@ -1954,21 +1925,22 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 	if (!fc)
 		return -EPERM;
 
-	bufs = kmalloc(pipe->buffers * sizeof(struct pipe_buffer), GFP_KERNEL);
-	if (!bufs)
-		return -ENOMEM;
-
 	pipe_lock(pipe);
+
+	bufs = kmalloc(pipe->buffers * sizeof(struct pipe_buffer), GFP_KERNEL);
+	if (!bufs) {
+		pipe_unlock(pipe);
+		return -ENOMEM;
+	}
+
 	nbuf = 0;
 	rem = 0;
 	for (idx = 0; idx < pipe->nrbufs && rem < len; idx++)
 		rem += pipe->bufs[(pipe->curbuf + idx) & (pipe->buffers - 1)].len;
 
 	ret = -EINVAL;
-	if (rem < len) {
-		pipe_unlock(pipe);
-		goto out;
-	}
+	if (rem < len)
+		goto out_free;
 
 	rem = len;
 	while (rem) {
@@ -1986,7 +1958,9 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 			pipe->curbuf = (pipe->curbuf + 1) & (pipe->buffers - 1);
 			pipe->nrbufs--;
 		} else {
-			ibuf->ops->get(pipe, ibuf);
+			if (!pipe_buf_get(pipe, ibuf))
+				goto out_free;
+
 			*obuf = *ibuf;
 			obuf->flags &= ~PIPE_BUF_FLAG_GIFT;
 			obuf->len = rem;
@@ -2007,11 +1981,14 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 
 	ret = fuse_dev_do_write(fc, &cs, len);
 
+	pipe_lock(pipe);
+out_free:
 	for (idx = 0; idx < nbuf; idx++) {
 		struct pipe_buffer *buf = &bufs[idx];
 		buf->ops->release(pipe, buf);
 	}
-out:
+	pipe_unlock(pipe);
+
 	kfree(bufs);
 	return ret;
 }

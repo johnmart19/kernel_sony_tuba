@@ -31,6 +31,11 @@ int mfd_cell_enable(struct platform_device *pdev)
 	const struct mfd_cell *cell = mfd_get_cell(pdev);
 	int err = 0;
 
+	if (!cell->enable) {
+		dev_dbg(&pdev->dev, "No .enable() call-back registered\n");
+		return 0;
+	}
+
 	/* only call enable hook if the cell wasn't previously enabled */
 	if (atomic_inc_return(cell->usage_count) == 1)
 		err = cell->enable(pdev);
@@ -47,6 +52,11 @@ int mfd_cell_disable(struct platform_device *pdev)
 {
 	const struct mfd_cell *cell = mfd_get_cell(pdev);
 	int err = 0;
+
+	if (!cell->disable) {
+		dev_dbg(&pdev->dev, "No .disable() call-back registered\n");
+		return 0;
+	}
 
 	/* only disable if no other clients are using it */
 	if (atomic_dec_return(cell->usage_count) == 0)
@@ -299,44 +309,6 @@ void mfd_remove_devices(struct device *parent)
 }
 EXPORT_SYMBOL(mfd_remove_devices);
 
-static void devm_mfd_dev_release(struct device *dev, void *res)
-{
-	mfd_remove_devices(dev);
-}
-
-/**
- * devm_mfd_add_devices - Resource managed version of mfd_add_devices()
- *
- * Returns 0 on success or an appropriate negative error number on failure.
- * All child-devices of the MFD will automatically be removed when it gets
- * unbinded.
- */
-int devm_mfd_add_devices(struct device *dev, int id,
-			 const struct mfd_cell *cells, int n_devs,
-			 struct resource *mem_base,
-			 int irq_base, struct irq_domain *domain)
-{
-	struct device **ptr;
-	int ret;
-
-	ptr = devres_alloc(devm_mfd_dev_release, sizeof(*ptr), GFP_KERNEL);
-	if (!ptr)
-		return -ENOMEM;
-
-	ret = mfd_add_devices(dev, id, cells, n_devs, mem_base,
-			      irq_base, domain);
-	if (ret < 0) {
-		devres_free(ptr);
-		return ret;
-	}
-
-	*ptr = dev;
-	devres_add(dev, ptr);
-
-	return ret;
-}
-EXPORT_SYMBOL(devm_mfd_add_devices);
-
 int mfd_clone_cell(const char *cell, const char **clones, size_t n_clones)
 {
 	struct mfd_cell cell_entry;
@@ -363,6 +335,8 @@ int mfd_clone_cell(const char *cell, const char **clones, size_t n_clones)
 			dev_err(dev, "failed to create platform device '%s'\n",
 					clones[i]);
 	}
+
+	put_device(dev);
 
 	return 0;
 }

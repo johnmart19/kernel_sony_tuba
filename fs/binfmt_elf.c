@@ -38,10 +38,6 @@
 #include <asm/param.h>
 #include <asm/page.h>
 
-#ifdef CONFIG_MTK_EXTMEM
-#include <linux/exm_driver.h>
-#endif
-
 #ifndef user_long_t
 #define user_long_t long
 #endif
@@ -738,6 +734,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		current->flags |= PF_RANDOMIZE;
 
 	setup_new_exec(bprm);
+	install_exec_creds(bprm);
 
 	/* Do this so that we can load the interpreter, if need be.  We will
 	   change some of these later */
@@ -939,7 +936,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		goto out;
 #endif /* ARCH_HAS_SETUP_ADDITIONAL_PAGES */
 
-	install_exec_creds(bprm);
 	retval = create_elf_tables(bprm, &loc->elf_ex,
 			  load_addr, interp_load_addr);
 	if (retval < 0)
@@ -953,26 +949,20 @@ static int load_elf_binary(struct linux_binprm *bprm)
 
 #ifdef arch_randomize_brk
 	if ((current->flags & PF_RANDOMIZE) && (randomize_va_space > 1)) {
-		int rand_tries = 0;
-		unsigned long org_brk = current->mm->brk;
-
-		while (rand_tries++ < 32) {
+		/*
+		 * For architectures with ELF randomization, when executing
+		 * a loader directly (i.e. no interpreter listed in ELF
+		 * headers), move the brk area out of the mmap region
+		 * (since it grows up, and may collide early with the stack
+		 * growing down), and into the unused ELF_ET_DYN_BASE region.
+		 */
+		if (IS_ENABLED(CONFIG_ARCH_HAS_ELF_RANDOMIZE) &&
+		    loc->elf_ex.e_type == ET_DYN && !interpreter)
 			current->mm->brk = current->mm->start_brk =
-				arch_randomize_brk(current->mm);
+				ELF_ET_DYN_BASE;
 
-			if (find_vma_intersection(current->mm, current->mm->brk - PAGE_SIZE,
-						  current->mm->brk + PAGE_SIZE)) {
-
-				pr_alert("%s %d: rand_tries %d vmstack_start %lx vmstack_end %lx org_brk %lx current->mm->brk %lx\n",
-							__func__, __LINE__,
-							rand_tries, bprm->vma->vm_start, bprm->vma->vm_end,
-							org_brk, current->mm->brk);
-
-				current->mm->brk = current->mm->start_brk = org_brk;
-			}
-			else
-				break;
-		}
+		current->mm->brk = current->mm->start_brk =
+			arch_randomize_brk(current->mm);
 #ifdef CONFIG_COMPAT_BRK
 		current->brk_randomized = 1;
 #endif
@@ -1137,11 +1127,6 @@ static bool always_dump_vma(struct vm_area_struct *vma)
 	 */
 	if (arch_vma_name(vma))
 		return true;
-
-#ifdef CONFIG_MTK_EXTMEM
-	if (extmem_in_mspace(vma))
-		return true;
-#endif
 
 	return false;
 }
@@ -1579,10 +1564,10 @@ static int fill_thread_core_info(struct elf_thread_core_info *t,
 		const struct user_regset *regset = &view->regsets[i];
 		do_thread_regset_writeback(t->task, regset);
 		if (regset->core_note_type && regset->get &&
-		    (!regset->active || regset->active(t->task, regset))) {
+		    (!regset->active || regset->active(t->task, regset) > 0)) {
 			int ret;
 			size_t size = regset->n * regset->size;
-			void *data = kmalloc(size, GFP_KERNEL);
+			void *data = kzalloc(size, GFP_KERNEL);
 			if (unlikely(!data))
 				return 0;
 			ret = regset->get(t->task, regset,
@@ -2191,23 +2176,6 @@ static int elf_core_dump(struct coredump_params *cprm)
 
 		end = vma->vm_start + vma_dump_size(vma, cprm->mm_flags);
 
-#ifdef CONFIG_MTK_EXTMEM
-		if (extmem_in_mspace(vma)) {
-			void *extmem_va = (void *)get_virt_from_mspace(vma->vm_pgoff << PAGE_SHIFT);
-
-			for (addr = vma->vm_start; addr < end; addr += PAGE_SIZE, extmem_va += PAGE_SIZE) {
-				int stop = !dump_emit(cprm, extmem_va, PAGE_SIZE);
-
-				if (stop) {
-					pr_err("[EXT_MEM]stop addr:0x%lx, extmem_va:0x%p, vm_start:0x%lx, vm_end:0x%lx\n",
-						addr, extmem_va, vma->vm_start, end);
-					goto end_coredump;
-				}
-			}
-			continue;
-		}
-#endif
-
 		for (addr = vma->vm_start; addr < end; addr += PAGE_SIZE) {
 			struct page *page;
 			int stop;
@@ -2224,6 +2192,7 @@ static int elf_core_dump(struct coredump_params *cprm)
 				goto end_coredump;
 		}
 	}
+	dump_truncate(cprm);
 
 	if (!elf_core_write_extra_data(cprm))
 		goto end_coredump;

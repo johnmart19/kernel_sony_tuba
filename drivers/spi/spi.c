@@ -45,11 +45,6 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/spi.h>
-#if defined(CONFIG_ARCH_MT6797)
-#include <mt_chip.h>
-#include <mt_vcorefs_manager.h>
-bool spi_dvfs_flag = 0;
-#endif
 
 static void spidev_release(struct device *dev)
 {
@@ -663,15 +658,8 @@ static int __spi_map_msg(struct spi_master *master, struct spi_message *msg)
 	if (!master->can_dma)
 		return 0;
 
-	if (master->dma_tx)
-		tx_dev = master->dma_tx->device->dev;
-	else
-		tx_dev = &master->dev;
-
-	if (master->dma_rx)
-		rx_dev = master->dma_rx->device->dev;
-	else
-		rx_dev = &master->dev;
+	tx_dev = master->dma_tx->device->dev;
+	rx_dev = master->dma_rx->device->dev;
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		if (!master->can_dma(master, msg->spi, xfer))
@@ -710,15 +698,8 @@ static int spi_unmap_msg(struct spi_master *master, struct spi_message *msg)
 	if (!master->cur_msg_mapped || !master->can_dma)
 		return 0;
 
-	if (master->dma_tx)
-		tx_dev = master->dma_tx->device->dev;
-	else
-		tx_dev = &master->dev;
-
-	if (master->dma_rx)
-		rx_dev = master->dma_rx->device->dev;
-	else
-		rx_dev = &master->dev;
+	tx_dev = master->dma_tx->device->dev;
+	rx_dev = master->dma_rx->device->dev;
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		if (!master->can_dma(master, msg->spi, xfer))
@@ -783,6 +764,8 @@ static int spi_map_msg(struct spi_master *master, struct spi_message *msg)
 		if (max_tx || max_rx) {
 			list_for_each_entry(xfer, &msg->transfers,
 					    transfer_list) {
+				if (!xfer->len)
+					continue;
 				if (!xfer->tx_buf)
 					xfer->tx_buf = master->dummy_tx;
 				if (!xfer->rx_buf)
@@ -1521,6 +1504,46 @@ struct spi_master *spi_alloc_master(struct device *dev, unsigned size)
 }
 EXPORT_SYMBOL_GPL(spi_alloc_master);
 
+static void devm_spi_release_master(struct device *dev, void *master)
+{
+	spi_master_put(*(struct spi_master **)master);
+}
+
+/**
+ * devm_spi_alloc_master - resource-managed spi_alloc_master()
+ * @dev: physical device of SPI master
+ * @size: how much zeroed driver-private data to allocate
+ * Context: can sleep
+ *
+ * Allocate an SPI master and automatically release a reference on it
+ * when @dev is unbound from its driver.  Drivers are thus relieved from
+ * having to call spi_master_put().
+ *
+ * The arguments to this function are identical to spi_alloc_master().
+ *
+ * Return: the SPI master structure on success, else NULL.
+ */
+struct spi_master *devm_spi_alloc_master(struct device *dev, unsigned int size)
+{
+	struct spi_master **ptr, *master;
+
+	ptr = devres_alloc(devm_spi_release_master, sizeof(*ptr),
+			   GFP_KERNEL);
+	if (!ptr)
+		return NULL;
+
+	master = spi_alloc_master(dev, size);
+	if (master) {
+		*ptr = master;
+		devres_add(dev, ptr);
+	} else {
+		devres_free(ptr);
+	}
+
+	return master;
+}
+EXPORT_SYMBOL_GPL(devm_spi_alloc_master);
+
 #ifdef CONFIG_OF
 static int of_spi_register_master(struct spi_master *master)
 {
@@ -1692,6 +1715,11 @@ int devm_spi_register_master(struct device *dev, struct spi_master *master)
 }
 EXPORT_SYMBOL_GPL(devm_spi_register_master);
 
+static int devm_spi_match_master(struct device *dev, void *res, void *master)
+{
+	return *(struct spi_master **)res == master;
+}
+
 static int __unregister(struct device *dev, void *null)
 {
 	spi_unregister_device(to_spi_device(dev));
@@ -1710,7 +1738,7 @@ static int __unregister(struct device *dev, void *null)
  */
 void spi_unregister_master(struct spi_master *master)
 {
-	int dummy;
+	device_for_each_child(&master->dev, NULL, __unregister);
 
 	if (master->queued) {
 		if (spi_destroy_queue(master))
@@ -1721,8 +1749,14 @@ void spi_unregister_master(struct spi_master *master)
 	list_del(&master->list);
 	mutex_unlock(&board_lock);
 
-	dummy = device_for_each_child(&master->dev, NULL, __unregister);
-	device_unregister(&master->dev);
+	device_del(&master->dev);
+
+	/* Release the last reference on the master if its driver
+	 * has not yet been converted to devm_spi_alloc_master().
+	 */
+	if (!devres_find(master->dev.parent, devm_spi_release_master,
+			 devm_spi_match_master, master))
+		put_device(&master->dev);
 }
 EXPORT_SYMBOL_GPL(spi_unregister_master);
 
@@ -2123,10 +2157,7 @@ static int __spi_sync(struct spi_device *spi, struct spi_message *message,
 
 	message->complete = spi_complete;
 	message->context = &done;
-#if defined(CONFIG_ARCH_MT6797)
-	if ((master->bus_num == 1) && (spi_dvfs_flag))
-		vcorefs_request_dvfs_opp(KIR_REESPI, OPPI_PERF);
-#endif
+
 	if (!bus_locked)
 		mutex_lock(&master->bus_lock_mutex);
 
@@ -2140,10 +2171,6 @@ static int __spi_sync(struct spi_device *spi, struct spi_message *message,
 		status = message->status;
 	}
 	message->context = NULL;
-#if defined(CONFIG_ARCH_MT6797)
-	if ((master->bus_num == 1) && (spi_dvfs_flag))
-		vcorefs_request_dvfs_opp(KIR_REESPI, OPPI_UNREQ);
-#endif
 	return status;
 }
 
@@ -2333,16 +2360,7 @@ EXPORT_SYMBOL_GPL(spi_write_then_read);
 static int __init spi_init(void)
 {
 	int	status;
-#if defined(CONFIG_ARCH_MT6797)
-	int ver;
 
-	ver = mt_get_chip_hw_ver();
-
-	if (0xCA01 == ver)
-		spi_dvfs_flag = 0;
-	else
-		spi_dvfs_flag = 1;
-#endif
 	buf = kmalloc(SPI_BUFSIZ, GFP_KERNEL);
 	if (!buf) {
 		status = -ENOMEM;

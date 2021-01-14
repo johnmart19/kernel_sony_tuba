@@ -29,8 +29,6 @@
 #include <net/sch_generic.h>
 #include <net/pkt_sched.h>
 #include <net/dst.h>
-#include <net/ip.h>
-#include <net/ipv6.h>
 
 /* Qdisc to use by default */
 const struct Qdisc_ops *default_qdisc_ops = &pfifo_fast_ops;
@@ -51,6 +49,7 @@ static inline int dev_requeue_skb(struct sk_buff *skb, struct Qdisc *q)
 {
 	q->gso_skb = skb;
 	q->qstats.requeues++;
+	qdisc_qstats_backlog_inc(q, skb);
 	q->q.qlen++;	/* it's still part of the queue */
 	__netif_schedule(q);
 
@@ -94,6 +93,7 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate,
 		txq = skb_get_tx_queue(txq->dev, skb);
 		if (!netif_xmit_frozen_or_stopped(txq)) {
 			q->gso_skb = NULL;
+			qdisc_qstats_backlog_dec(q, skb);
 			q->q.qlen--;
 		} else
 			skb = NULL;
@@ -161,28 +161,16 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 	if (validate)
 		skb = validate_xmit_skb_list(skb, dev);
 
-	if (skb) {
+	if (likely(skb)) {
 		HARD_TX_LOCK(dev, txq, smp_processor_id());
 		if (!netif_xmit_frozen_or_stopped(txq))
 			skb = dev_hard_start_xmit(skb, dev, txq, &ret);
 
 		HARD_TX_UNLOCK(dev, txq);
+	} else {
+		spin_lock(root_lock);
+		return qdisc_qlen(q);
 	}
-
-	#ifdef CONFIG_MTK_NET_LOGGING
-	if (ret != NETDEV_TX_OK) {
-		if (qdisc_qlen(q) < 16) {
-			if (4 == (qdisc_qlen(q)) % 16)
-				pr_debug("[mtk_net][sched]dev_hard_start_xmit ret = %d(%s), txq state = %lu\n",
-					 ret, dev->name, txq->state);
-		} else {
-				if (64 == (qdisc_qlen(q)) % 128)
-					pr_debug("[mtk_net][sched]warning: dev_hard_start_xmit ret = %d(%s), txq state = %lu\n",
-						 ret, dev->name, txq->state);
-		}
-	}
-	#endif
-
 	spin_lock(root_lock);
 
 	if (dev_xmit_complete(ret)) {
@@ -341,6 +329,7 @@ void __netdev_watchdog_up(struct net_device *dev)
 			dev_hold(dev);
 	}
 }
+EXPORT_SYMBOL_GPL(__netdev_watchdog_up);
 
 static void dev_watchdog_up(struct net_device *dev)
 {
@@ -498,11 +487,8 @@ static int pfifo_fast_enqueue(struct sk_buff *skb, struct Qdisc *qdisc)
 {
 	if (skb_queue_len(&qdisc->q) < qdisc_dev(qdisc)->tx_queue_len) {
 		int band = prio2band[skb->priority & TC_PRIO_MAX];
-		struct pfifo_fast_priv *priv;
-		struct sk_buff_head *list;
-
-		priv = qdisc_priv(qdisc);
-		list = band2list(priv, band);
+		struct pfifo_fast_priv *priv = qdisc_priv(qdisc);
+		struct sk_buff_head *list = band2list(priv, band);
 
 		priv->bitmap |= (1 << band);
 		qdisc->q.qlen++;
@@ -649,18 +635,19 @@ struct Qdisc *qdisc_create_dflt(struct netdev_queue *dev_queue,
 	struct Qdisc *sch;
 
 	if (!try_module_get(ops->owner))
-		goto errout;
+		return NULL;
 
 	sch = qdisc_alloc(dev_queue, ops);
-	if (IS_ERR(sch))
-		goto errout;
+	if (IS_ERR(sch)) {
+		module_put(ops->owner);
+		return NULL;
+	}
 	sch->parent = parentid;
 
 	if (!ops->init || ops->init(sch, NULL) == 0)
 		return sch;
 
 	qdisc_destroy(sch);
-errout:
 	return NULL;
 }
 EXPORT_SYMBOL(qdisc_create_dflt);
@@ -696,7 +683,11 @@ static void qdisc_rcu_free(struct rcu_head *head)
 
 void qdisc_destroy(struct Qdisc *qdisc)
 {
-	const struct Qdisc_ops  *ops = qdisc->ops;
+	const struct Qdisc_ops *ops;
+
+	if (!qdisc)
+		return;
+	ops = qdisc->ops;
 
 	if (qdisc->flags & TCQ_F_BUILTIN ||
 	    !atomic_dec_and_test(&qdisc->refcnt))
@@ -812,10 +803,10 @@ void dev_activate(struct net_device *dev)
 	int need_watchdog;
 
 	/* No queueing discipline is attached to device;
-	* create default one for devices, which need queueing
-	* and noqueue_qdisc for virtual interfaces
-	*/
-	pr_debug("[mtk net][sched]dev activate dev = %s\n", dev->name);
+	 * create default one for devices, which need queueing
+	 * and noqueue_qdisc for virtual interfaces
+	 */
+
 	if (dev->qdisc == &noop_qdisc)
 		attach_default_qdiscs(dev);
 
@@ -868,13 +859,6 @@ static bool some_qdisc_is_busy(struct net_device *dev)
 
 		dev_queue = netdev_get_tx_queue(dev, i);
 		q = dev_queue->qdisc_sleeping;
-
-		/*MTK_NET_CHANGES*/
-		if (q == NULL) {
-			pr_err("some_qdisc_is_busy dev = %p, i = %d, dev_q = %p", dev, i, dev_queue);
-			BUG_ON(q == NULL);
-		}
-
 		root_lock = qdisc_lock(q);
 
 		spin_lock_bh(root_lock);
@@ -929,10 +913,8 @@ void dev_deactivate_many(struct list_head *head)
 void dev_deactivate(struct net_device *dev)
 {
 	LIST_HEAD(single);
+
 	list_add(&dev->close_list, &single);
-
-	pr_debug("[mtk net][sched]dev deactivate dev = %s\n", dev->name);
-
 	dev_deactivate_many(&single);
 	list_del(&single);
 }
