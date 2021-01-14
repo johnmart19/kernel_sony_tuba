@@ -30,15 +30,15 @@
 
 #include "gadget_chips.h"
 
-#include "f_fs.c"
-#include "f_audio_source.c"
-#include "f_mass_storage.c"
-#include "f_mtp.c"
-#include "f_accessory.c"
+#include "function/f_fs.c"
+#include "function/f_audio_source.c"
+#include "function/f_mass_storage.c"
+#include "function/f_mtp.c"
+#include "function/f_accessory.c"
 #define USB_ETH_RNDIS y
-#include "f_rndis.c"
-#include "rndis.c"
-#include "u_ether.c"
+#include "function/f_rndis.c"
+#include "function/rndis.c"
+#include "function/u_ether.c"
 
 MODULE_AUTHOR("Mike Lockwood");
 MODULE_DESCRIPTION("Android Composite USB Driver");

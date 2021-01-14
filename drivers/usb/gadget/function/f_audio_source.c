@@ -300,11 +300,6 @@ static ssize_t audio_source_pcm_show(struct device *dev,
 
 static DEVICE_ATTR(pcm, S_IRUGO, audio_source_pcm_show, NULL);
 
-static struct device_attribute *audio_source_function_attributes[] = {
-	&dev_attr_pcm,
-	NULL
-};
-
 /*--------------------------------------------------------------------------*/
 
 static struct usb_request *audio_request_new(struct usb_ep *ep, int buffer_size)
@@ -975,16 +970,6 @@ static void audio_source_free_inst(struct usb_function_instance *fi)
 			fi_audio->audio_device->devt);
 	kfree(fi_audio->name);
 	kfree(fi_audio->config);
-}
-
-static ssize_t audio_source_pcm_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct audio_source_instance *fi_audio = dev_get_drvdata(dev);
-	struct audio_source_config *config = fi_audio->config;
-
-	/* print PCM card and device numbers */
-	return sprintf(buf, "%d %d\n", config->card, config->device);
 }
 
 struct device *create_function_device(char *name);
